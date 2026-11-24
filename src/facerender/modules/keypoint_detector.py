@@ -46,9 +46,11 @@ class KPDetector(nn.Module):
         Extract the mean from a heatmap
         """
         shape = heatmap.shape
-        heatmap = heatmap.unsqueeze(-1)
-        grid = make_coordinate_grid(shape[2:], heatmap.type()).unsqueeze_(0).unsqueeze_(0)
-        value = (heatmap * grid).sum(dim=(2, 3, 4))
+        grid = make_coordinate_grid(shape[2:], heatmap.type()).to(device=heatmap.device, dtype=heatmap.dtype)
+        # Flatten spatial dims (D, H, W) -> N to stay <= 4D (required by DirectML)
+        heatmap_flat = heatmap.reshape(shape[0], shape[1], -1, 1)
+        grid_flat = grid.reshape(1, 1, -1, 3)
+        value = (heatmap_flat * grid_flat).sum(dim=2)
         kp = {'value': value}
 
         return kp

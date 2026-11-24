@@ -11,6 +11,7 @@ from src.facerender.animate import AnimateFromCoeff
 from src.generate_batch import get_data
 from src.generate_facerender_batch import get_facerender_data
 from src.utils.init_path import init_path
+from src.utils.device import get_device, describe_device
 
 def main(args):
     #torch.backends.cudnn.enabled = False
@@ -113,6 +114,7 @@ if __name__ == '__main__':
     parser.add_argument('--enhancer',  type=str, default=None, help="Face enhancer, [gfpgan, RestoreFormer]")
     parser.add_argument('--background_enhancer',  type=str, default=None, help="background enhancer, [realesrgan]")
     parser.add_argument("--cpu", dest="cpu", action="store_true") 
+    parser.add_argument("--device", type=str, default="auto", help="compute device: auto, cpu, cuda, dml, dml:N, mps")
     parser.add_argument("--face3dvis", action="store_true", help="generate 3d face and 3d landmarks") 
     parser.add_argument("--still", action="store_true", help="can crop back to the original videos for the full body aniamtion") 
     parser.add_argument("--preprocess", default='crop', choices=['crop', 'extcrop', 'resize', 'full', 'extfull'], help="how to preprocess the images" ) 
@@ -136,10 +138,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    if torch.cuda.is_available() and not args.cpu:
-        args.device = "cuda"
-    else:
-        args.device = "cpu"
+    args.device = get_device(prefer_cpu=args.cpu, device_arg=args.device)
+    print(f"Using device: {describe_device(args.device)}")
 
     main(args)
 

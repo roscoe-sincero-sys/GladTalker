@@ -14,23 +14,17 @@ def kp2gaussian(kp, spatial_size, kp_variance):
     Transform a keypoint into gaussian like representation
     """
     mean = kp['value']
+    d, h, w = spatial_size
+    leading = mean.shape[:-1]
 
-    coordinate_grid = make_coordinate_grid(spatial_size, mean.type())
-    number_of_leading_dimensions = len(mean.shape) - 1
-    shape = (1,) * number_of_leading_dimensions + coordinate_grid.shape
-    coordinate_grid = coordinate_grid.view(*shape)
-    repeats = mean.shape[:number_of_leading_dimensions] + (1, 1, 1, 1)
-    coordinate_grid = coordinate_grid.repeat(*repeats)
-
-    # Preprocess kp shape
-    shape = mean.shape[:number_of_leading_dimensions] + (1, 1, 1, 3)
-    mean = mean.view(*shape)
-
-    mean_sub = (coordinate_grid - mean)
+    coordinate_grid = make_coordinate_grid(spatial_size, mean.type()).to(device=mean.device, dtype=mean.dtype)
+    # Flatten spatial dims (D, H, W) -> N to stay <= 4D (required by DirectML)
+    grid_flat = coordinate_grid.reshape((1,) * len(leading) + (d * h * w, 3))
+    mean_flat = mean.reshape(*leading, 1, 3)
+    mean_sub = grid_flat - mean_flat
 
     out = torch.exp(-0.5 * (mean_sub ** 2).sum(-1) / kp_variance)
-
-    return out
+    return out.reshape(*leading, d, h, w)
 
 def make_coordinate_grid_2d(spatial_size, type):
     """

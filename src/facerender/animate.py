@@ -113,7 +113,7 @@ class AnimateFromCoeff():
                         kp_detector=None, he_estimator=None, optimizer_generator=None, 
                         optimizer_discriminator=None, optimizer_kp_detector=None, 
                         optimizer_he_estimator=None, device="cpu"):
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device(device), weights_only=False)
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         if generator is not None:
             generator.load_state_dict(checkpoint['generator'])
         if kp_detector is not None:
@@ -141,7 +141,7 @@ class AnimateFromCoeff():
     
     def load_cpk_mapping(self, checkpoint_path, mapping=None, discriminator=None,
                  optimizer_mapping=None, optimizer_discriminator=None, device='cpu'):
-        checkpoint = torch.load(checkpoint_path,  map_location=torch.device(device), weights_only=False)
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         if mapping is not None:
             mapping.load_state_dict(checkpoint['mapping'])
         if discriminator is not None:

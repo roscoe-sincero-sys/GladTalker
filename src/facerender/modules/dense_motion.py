@@ -33,36 +33,34 @@ class DenseMotionNetwork(nn.Module):
 
     def create_sparse_motions(self, feature, kp_driving, kp_source):
         bs, _, d, h, w = feature.shape
-        identity_grid = make_coordinate_grid((d, h, w), type=kp_source['value'].type())
-        identity_grid = identity_grid.view(1, 1, d, h, w, 3)
-        coordinate_grid = identity_grid - kp_driving['value'].view(bs, self.num_kp, 1, 1, 1, 3)
-        
-        # if 'jacobian' in kp_driving:
+        device = kp_source['value'].device
+        dtype = kp_source['value'].dtype
+        identity_grid = make_coordinate_grid((d, h, w), type=kp_source['value'].type()).to(device=device, dtype=dtype)
+        # Flatten spatial dims (d, h, w) -> n to stay <= 4D (required by DirectML)
+        n = d * h * w
+        identity_flat = identity_grid.reshape(1, 1, n, 3)
+        coordinate_grid = identity_flat - kp_driving['value'].reshape(bs, self.num_kp, 1, 3)
+
         if 'jacobian' in kp_driving and kp_driving['jacobian'] is not None:
             jacobian = torch.matmul(kp_source['jacobian'], torch.inverse(kp_driving['jacobian']))
-            jacobian = jacobian.unsqueeze(-3).unsqueeze(-3).unsqueeze(-3)
-            jacobian = jacobian.repeat(1, 1, d, h, w, 1, 1)
-            coordinate_grid = torch.matmul(jacobian, coordinate_grid.unsqueeze(-1))
-            coordinate_grid = coordinate_grid.squeeze(-1)                  
+            # (bs, num_kp, 3, 3) x (bs, num_kp, 3, n) -> (bs, num_kp, n, 3)
+            coordinate_grid = torch.matmul(coordinate_grid, jacobian.transpose(-1, -2))
 
+        driving_to_source = coordinate_grid + kp_source['value'].reshape(bs, self.num_kp, 1, 3)
 
-        driving_to_source = coordinate_grid + kp_source['value'].view(bs, self.num_kp, 1, 1, 1, 3)    # (bs, num_kp, d, h, w, 3)
-
-        #adding background feature
-        identity_grid = identity_grid.repeat(bs, 1, 1, 1, 1, 1)
-        sparse_motions = torch.cat([identity_grid, driving_to_source], dim=1)                #bs num_kp+1 d h w 3
-        
-        # sparse_motions = driving_to_source
+        # adding background feature
+        identity_bg = identity_flat.expand(bs, 1, n, 3).contiguous()
+        sparse_motions = torch.cat([identity_bg, driving_to_source], dim=1)  # (bs, num_kp+1, n, 3)
+        sparse_motions = sparse_motions.reshape(bs, self.num_kp + 1, d, h, w, 3)
 
         return sparse_motions
 
     def create_deformed_feature(self, feature, sparse_motions):
-        bs, _, d, h, w = feature.shape
-        feature_repeat = feature.unsqueeze(1).unsqueeze(1).repeat(1, self.num_kp+1, 1, 1, 1, 1, 1)      # (bs, num_kp+1, 1, c, d, h, w)
-        feature_repeat = feature_repeat.view(bs * (self.num_kp+1), -1, d, h, w)                         # (bs*(num_kp+1), c, d, h, w)
-        sparse_motions = sparse_motions.view((bs * (self.num_kp+1), d, h, w, -1))                       # (bs*(num_kp+1), d, h, w, 3) !!!!
+        bs, c, d, h, w = feature.shape
+        feature_repeat = feature.unsqueeze(1).expand(bs, self.num_kp + 1, c, d, h, w).reshape(bs * (self.num_kp + 1), c, d, h, w)
+        sparse_motions = sparse_motions.reshape(bs * (self.num_kp + 1), d, h, w, 3)
         sparse_deformed = F.grid_sample(feature_repeat, sparse_motions)
-        sparse_deformed = sparse_deformed.view((bs, self.num_kp+1, -1, d, h, w))                        # (bs, num_kp+1, c, d, h, w)
+        sparse_deformed = sparse_deformed.reshape(bs, self.num_kp + 1, c, d, h, w)
         return sparse_deformed
 
     def create_heatmap_representations(self, feature, kp_driving, kp_source):
@@ -72,7 +70,10 @@ class DenseMotionNetwork(nn.Module):
         heatmap = gaussian_driving - gaussian_source
 
         # adding background feature
-        zeros = torch.zeros(heatmap.shape[0], 1, spatial_size[0], spatial_size[1], spatial_size[2]).type(heatmap.type())
+        zeros = torch.zeros(
+            heatmap.shape[0], 1, spatial_size[0], spatial_size[1], spatial_size[2],
+            device=heatmap.device, dtype=heatmap.dtype,
+        )
         heatmap = torch.cat([zeros, heatmap], dim=1)
         heatmap = heatmap.unsqueeze(2)         # (bs, num_kp+1, 1, d, h, w)
         return heatmap
@@ -90,8 +91,10 @@ class DenseMotionNetwork(nn.Module):
 
         heatmap = self.create_heatmap_representations(deformed_feature, kp_driving, kp_source)
 
-        input_ = torch.cat([heatmap, deformed_feature], dim=2)
-        input_ = input_.view(bs, -1, d, h, w)
+        # Cat in 5D (bs*(num_kp+1), 1+c, d, h, w) to stay <= 5D (required by DirectML)
+        heatmap_5d = heatmap.reshape(bs * (self.num_kp + 1), 1, d, h, w)
+        deformed_5d = deformed_feature.reshape(bs * (self.num_kp + 1), -1, d, h, w)
+        input_ = torch.cat([heatmap_5d, deformed_5d], dim=1).reshape(bs, -1, d, h, w)
 
         # input = deformed_feature.view(bs, -1, d, h, w)      # (bs, num_kp+1 * c, d, h, w)
 
@@ -101,14 +104,15 @@ class DenseMotionNetwork(nn.Module):
         mask = self.mask(prediction)
         mask = F.softmax(mask, dim=1)
         out_dict['mask'] = mask
-        mask = mask.unsqueeze(2)                                   # (bs, num_kp+1, 1, d, h, w)
-        
-        zeros_mask = torch.zeros_like(mask)   
-        mask = torch.where(mask < 1e-3, zeros_mask, mask) 
 
-        sparse_motion = sparse_motion.permute(0, 1, 5, 2, 3, 4)    # (bs, num_kp+1, 3, d, h, w)
-        deformation = (sparse_motion * mask).sum(dim=1)            # (bs, 3, d, h, w)
-        deformation = deformation.permute(0, 2, 3, 4, 1)           # (bs, d, h, w, 3)
+        zeros_mask = torch.zeros_like(mask)
+        mask = torch.where(mask < 1e-3, zeros_mask, mask)
+
+        # Flatten (d, h, w) -> n to stay <= 4D (required by DirectML)
+        n = d * h * w
+        sparse_motion_flat = sparse_motion.reshape(bs, self.num_kp + 1, n, 3)
+        mask_flat = mask.reshape(bs, self.num_kp + 1, n, 1)
+        deformation = (sparse_motion_flat * mask_flat).sum(dim=1).reshape(bs, d, h, w, 3)
 
         out_dict['deformation'] = deformation
 

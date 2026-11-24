@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from src.utils.device import get_device, is_gpu_device
 from src.utils.videoio import load_video_to_cv2
 
 
@@ -23,7 +24,7 @@ class SpandrelFaceRestorer:
 
         self.upscale = upscale
         self.bg_upsampler = bg_upsampler
-        self.device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+        self.device = get_device(device_arg=device) if device is not None else get_device()
 
         if model_path.startswith('https://') or model_path.startswith('http://'):
             model_path = load_file_from_url(
@@ -33,7 +34,11 @@ class SpandrelFaceRestorer:
                 file_name=None,
             )
 
-        self.model = spandrel.ModelLoader(device=self.device).load_from_file(model_path)
+        # Load on CPU first; keep GFPGAN StyleGAN2 weights on CPU for DirectML because
+        # torch-directml has a modulated-conv color-shift bug in GFPGANv1Clean.
+        self.model_device = torch.device('cpu') if self.device.type == 'privateuseone' else self.device
+        self.model = spandrel.ModelLoader(device=torch.device('cpu')).load_from_file(model_path)
+        self.model.to(self.model_device)
         self.model.eval()
 
         self.face_helper = FaceRestoreHelper(
@@ -65,7 +70,7 @@ class SpandrelFaceRestorer:
         for cropped_face in self.face_helper.cropped_faces:
             cropped_rgb = cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB)
             cropped_t = torch.from_numpy(cropped_rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-            output = self.model(cropped_t.to(self.device))
+            output = self.model(cropped_t.to(self.model_device))
             restored_rgb = (
                 output.squeeze(0).clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255.0
             ).round().astype(np.uint8)

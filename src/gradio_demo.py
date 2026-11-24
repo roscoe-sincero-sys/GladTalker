@@ -7,6 +7,7 @@ from src.generate_batch import get_data
 from src.generate_facerender_batch import get_facerender_data
 
 from src.utils.init_path import init_path
+from src.utils.device import get_device, empty_cache, describe_device
 
 from pydub import AudioSegment
 
@@ -20,12 +21,8 @@ class SadTalker():
 
     def __init__(self, checkpoint_path='checkpoints', config_path='src/config', lazy_load=False):
 
-        if torch.cuda.is_available() :
-            device = "cuda"
-        else:
-            device = "cpu"
-        
-        self.device = device
+        self.device = get_device()
+        print(f"Using device: {describe_device(self.device)}")
 
         os.environ['TORCH_HOME']= checkpoint_path
 
@@ -144,9 +141,7 @@ class SadTalker():
         del self.audio_to_coeff
         del self.animate_from_coeff
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+        empty_cache(self.device)
             
         import gc; gc.collect()
         
