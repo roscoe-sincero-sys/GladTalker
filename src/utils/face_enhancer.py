@@ -34,9 +34,11 @@ class SpandrelFaceRestorer:
                 file_name=None,
             )
 
-        # Load on CPU first then move to target device (avoids torch.load map_location bug on DirectML)
+        # Load on CPU first; keep GFPGAN StyleGAN2 weights on CPU for DirectML because
+        # torch-directml has a modulated-conv color-shift bug in GFPGANv1Clean.
+        self.model_device = torch.device('cpu') if self.device.type == 'privateuseone' else self.device
         self.model = spandrel.ModelLoader(device=torch.device('cpu')).load_from_file(model_path)
-        self.model.to(self.device)
+        self.model.to(self.model_device)
         self.model.eval()
 
         self.face_helper = FaceRestoreHelper(
@@ -68,12 +70,7 @@ class SpandrelFaceRestorer:
         for cropped_face in self.face_helper.cropped_faces:
             cropped_rgb = cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB)
             cropped_t = torch.from_numpy(cropped_rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-            inp = cropped_t.to(self.device)
-            if self.device.type == 'privateuseone':
-                # DirectML + PyTorch 2.4 raises on spandrel's @torch.inference_mode(); use @torch.no_grad()
-                output = self.model._call_fn(self.model.model, inp)
-            else:
-                output = self.model(inp)
+            output = self.model(cropped_t.to(self.model_device))
             restored_rgb = (
                 output.squeeze(0).clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255.0
             ).round().astype(np.uint8)
