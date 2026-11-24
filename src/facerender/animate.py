@@ -20,7 +20,6 @@ from src.facerender.modules.generator import OcclusionAwareGenerator, OcclusionA
 from src.facerender.modules.make_animation import make_animation 
 
 from pydub import AudioSegment 
-from src.utils.face_enhancer import enhancer_generator_with_len, enhancer_list
 from src.utils.paste_pic import paste_pic
 from src.utils.videoio import save_video_with_watermark
 
@@ -114,7 +113,7 @@ class AnimateFromCoeff():
                         kp_detector=None, he_estimator=None, optimizer_generator=None, 
                         optimizer_discriminator=None, optimizer_kp_detector=None, 
                         optimizer_he_estimator=None, device="cpu"):
-        checkpoint = torch.load(checkpoint_path, map_location=torch.device(device))
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device(device), weights_only=False)
         if generator is not None:
             generator.load_state_dict(checkpoint['generator'])
         if kp_detector is not None:
@@ -142,7 +141,7 @@ class AnimateFromCoeff():
     
     def load_cpk_mapping(self, checkpoint_path, mapping=None, discriminator=None,
                  optimizer_mapping=None, optimizer_discriminator=None, device='cpu'):
-        checkpoint = torch.load(checkpoint_path,  map_location=torch.device(device))
+        checkpoint = torch.load(checkpoint_path,  map_location=torch.device(device), weights_only=False)
         if mapping is not None:
             mapping.load_state_dict(checkpoint['mapping'])
         if discriminator is not None:
@@ -234,6 +233,7 @@ class AnimateFromCoeff():
 
         #### paste back then enhancers
         if enhancer:
+            from src.utils.face_enhancer import enhancer_generator_with_len, enhancer_list
             video_name_enhancer = x['video_name']  + '_enhanced.mp4'
             enhanced_path = os.path.join(video_save_dir, 'temp_'+video_name_enhancer)
             av_path_enhancer = os.path.join(video_save_dir, video_name_enhancer) 

@@ -14,7 +14,7 @@ from src.audio2exp_models.audio2exp import Audio2Exp
 from src.utils.safetensor_helper import load_x_from_safetensor  
 
 def load_cpk(checkpoint_path, model=None, optimizer=None, device="cpu"):
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device(device))
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device(device), weights_only=False)
     if model is not None:
         model.load_state_dict(checkpoint['model'])
     if optimizer is not None:

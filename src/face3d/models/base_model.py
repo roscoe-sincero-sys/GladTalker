@@ -253,7 +253,7 @@ class BaseModel(ABC):
             load_dir = self.save_dir    
         load_filename = 'epoch_%s.pth' % (epoch)
         load_path = os.path.join(load_dir, load_filename)
-        state_dict = torch.load(load_path, map_location=self.device)
+        state_dict = torch.load(load_path, map_location=self.device, weights_only=False)
         print('loading the model from %s' % load_path)
 
         for name in self.model_names:

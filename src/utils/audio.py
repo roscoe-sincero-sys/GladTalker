@@ -7,7 +7,7 @@ from scipy.io import wavfile
 from src.utils.hparams import hparams as hp
 
 def load_wav(path, sr):
-    return librosa.core.load(path, sr=sr)[0]
+    return librosa.load(path, sr=sr)[0]
 
 def save_wav(wav, path, sr):
     wav *= 32767 / max(0.01, np.max(np.abs(wav)))
@@ -15,7 +15,8 @@ def save_wav(wav, path, sr):
     wavfile.write(path, sr, wav.astype(np.int16))
 
 def save_wavenet_wav(wav, path, sr):
-    librosa.output.write_wav(path, wav, sr=sr)
+    import soundfile as sf
+    sf.write(path, wav, sr)
 
 def preemphasis(wav, k, preemphasize=True):
     if preemphasize:

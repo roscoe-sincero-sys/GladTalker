@@ -9,7 +9,10 @@ import os
 from skimage import transform as trans
 import torch
 import warnings
-warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning) 
+if hasattr(np, "exceptions") and hasattr(np.exceptions, "VisibleDeprecationWarning"):
+    warnings.filterwarnings("ignore", category=np.exceptions.VisibleDeprecationWarning)
+elif hasattr(np, "VisibleDeprecationWarning"):
+    warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning) 
 
 
@@ -41,11 +44,13 @@ def POS(xp, x):
 # resize and crop images for face reconstruction
 def resize_n_crop_img(img, lm, t, s, target_size=224., mask=None):
     w0, h0 = img.size
-    w = (w0*s).astype(np.int32)
-    h = (h0*s).astype(np.int32)
-    left = (w/2 - target_size/2 + float((t[0] - w0/2)*s)).astype(np.int32)
+    w = int(w0*s)
+    h = int(h0*s)
+    t0 = float(np.asarray(t[0]).item())
+    t1 = float(np.asarray(t[1]).item())
+    left = int(w/2 - target_size/2 + (t0 - w0/2)*s)
     right = left + target_size
-    up = (h/2 - target_size/2 + float((h0/2 - t[1])*s)).astype(np.int32)
+    up = int(h/2 - target_size/2 + (h0/2 - t1)*s)
     below = up + target_size
 
     img = img.resize((w, h), resample=Image.BICUBIC)
@@ -55,8 +60,8 @@ def resize_n_crop_img(img, lm, t, s, target_size=224., mask=None):
         mask = mask.resize((w, h), resample=Image.BICUBIC)
         mask = mask.crop((left, up, right, below))
 
-    lm = np.stack([lm[:, 0] - t[0] + w0/2, lm[:, 1] -
-                  t[1] + h0/2], axis=1)*s
+    lm = np.stack([lm[:, 0] - t0 + w0/2, lm[:, 1] -
+                  t1 + h0/2], axis=1)*s
     lm = lm - np.reshape(
             np.array([(w/2 - target_size/2), (h/2-target_size/2)]), [1, 2])
 
@@ -98,6 +103,6 @@ def align_img(img, lm, lm3D, mask=None, target_size=224., rescale_factor=102.):
 
     # processing the image
     img_new, lm_new, mask_new = resize_n_crop_img(img, lm, t, s, target_size=target_size, mask=mask)
-    trans_params = np.array([w0, h0, s, t[0], t[1]])
+    trans_params = np.array([w0, h0, float(s), float(np.asarray(t[0]).item()), float(np.asarray(t[1]).item())])
 
     return trans_params, img_new, lm_new, mask_new

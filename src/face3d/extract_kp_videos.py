@@ -13,7 +13,8 @@ from torch.multiprocessing import Pool, Process, set_start_method
 
 class KeypointExtractor():
     def __init__(self, device):
-        self.detector = face_alignment.FaceAlignment(face_alignment.LandmarksType._2D, 
+        landmarks_type = getattr(face_alignment.LandmarksType, 'TWO_D', None) or face_alignment.LandmarksType._2D
+        self.detector = face_alignment.FaceAlignment(landmarks_type, 
                                                      device=device)   
 
     def extract_keypoint(self, images, name=None, info=True):
