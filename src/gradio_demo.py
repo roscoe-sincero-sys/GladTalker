@@ -59,7 +59,7 @@ class SadTalker():
 
         print(source_image)
         pic_path = os.path.join(input_dir, os.path.basename(source_image)) 
-        shutil.move(source_image, input_dir)
+        shutil.copy2(source_image, pic_path)
 
         if driven_audio is not None and os.path.isfile(driven_audio):
             audio_path = os.path.join(input_dir, os.path.basename(driven_audio))  
@@ -69,7 +69,7 @@ class SadTalker():
                 mp3_to_wav(driven_audio, audio_path.replace('.mp3', '.wav'), 16000)
                 audio_path = audio_path.replace('.mp3', '.wav')
             else:
-                shutil.move(driven_audio, input_dir)
+                shutil.copy2(driven_audio, audio_path)
 
         elif use_idle_mode:
             audio_path = os.path.join(input_dir, 'idlemode_'+str(length_of_audio)+'.wav') ## generate audio from this new audio_path
@@ -122,7 +122,7 @@ class SadTalker():
                 ref_pose_coeff_path = None
                 ref_eyeblink_coeff_path = None
             else:
-                raise('error in refinfo')
+                raise ValueError('error in refinfo')
         else:
             ref_pose_coeff_path = None
             ref_eyeblink_coeff_path = None
