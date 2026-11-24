@@ -119,6 +119,7 @@ A video tutorial in chinese is available [here](https://www.bilibili.com/video/B
    python -m venv venv
    .\venv\Scripts\activate
    # CPU-only PyTorch (or choose a CUDA build at https://pytorch.org/get-started/locally/)
+   # For AMD GPUs on Windows (DirectML / ROCm), see docs/install.md#windows-amd-gpu-directml--rocm
    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
    pip install -r requirements.txt
    ```

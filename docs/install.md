@@ -16,6 +16,24 @@ pip install -r requirements.txt
 
 - Make sure you have `ffmpeg` in the `%PATH%` as suggested in [#54](https://github.com/Winfredy/SadTalker/issues/54), following [this](https://www.geeksforgeeks.org/how-to-install-ffmpeg-on-windows/) tutorial to install `ffmpeg` or using scoop.
 
+### Windows AMD GPU (DirectML / ROCm)
+
+GladTalker automatically detects available accelerators in order: **CUDA / ROCm → DirectML → MPS → CPU** (override with `--device auto|cpu|cuda|dml|dml:N|mps` or `GLADTALKER_DEVICE`).
+
+- **Option 1 — DirectML (`torch-directml`, works on Radeon RX 6000 / 7000 / integrated Radeon GPUs):**
+  > **Note:** `torch-directml` currently publishes wheels for **Python 3.10–3.12** (not Python 3.14 yet). Create a Python 3.12 virtual environment to use DirectML:
+  ```powershell
+  py -3.12 -m venv venv-dml
+  .\venv-dml\Scripts\activate
+  pip install torch-directml
+  pip install -r requirements.txt
+  python inference.py --device dml --driven_audio <audio.wav> --source_image <image.png>
+  ```
+  On dual-GPU laptops (e.g., integrated Radeon Graphics + discrete Radeon RX 6550M), GladTalker automatically prefers the discrete GPU; you can also pick an adapter explicitly with `--device dml:1` or `DML_DEVICE_INDEX=1`.
+
+- **Option 2 — AMD ROCm on Windows (Radeon RX 7000 / 9000 series):**
+  Install AMD's PyTorch ROCm Windows preview build (Python 3.12). PyTorch ROCm exposes the GPU through `torch.cuda`, so `--device auto` or `--device cuda` uses it automatically.
+
 
 ### Windows WSL
 

@@ -25,7 +25,7 @@ def init_alignment_model(model_name, half=False, device='cuda', model_rootpath=N
 
     model_path = load_file_from_url(
         url=model_url, model_dir='facexlib/weights', progress=True, file_name=None, save_dir=model_rootpath)
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False)['state_dict'], strict=True)
+    model.load_state_dict(torch.load(model_path, map_location='cpu', weights_only=False)['state_dict'], strict=True)
     model.eval()
     model = model.to(device)
     return model

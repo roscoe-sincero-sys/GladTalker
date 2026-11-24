@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from src.utils.device import get_device, is_gpu_device
 from src.utils.videoio import load_video_to_cv2
 
 
@@ -23,7 +24,7 @@ class SpandrelFaceRestorer:
 
         self.upscale = upscale
         self.bg_upsampler = bg_upsampler
-        self.device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+        self.device = get_device(device_arg=device) if device is not None else get_device()
 
         if model_path.startswith('https://') or model_path.startswith('http://'):
             model_path = load_file_from_url(
