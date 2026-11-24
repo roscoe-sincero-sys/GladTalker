@@ -133,7 +133,13 @@ Please check out additional tutorials [here](docs/install.md).
 
 ## 2. Download Models
 
-You can run the following script on Linux/macOS to automatically download all the models:
+You can run the cross-platform Python downloader on Windows, macOS, or Linux:
+
+```bash
+python scripts/download_models.py
+```
+
+Or on Linux/macOS with `wget`:
 
 ```bash
 bash scripts/download_models.sh
@@ -208,7 +214,7 @@ Please read our document on [best practices and configuration tips](docs/best_pr
 **Local gradio demo (recommanded)**: A Gradio instance similar to our [Hugging Face demo](https://huggingface.co/spaces/vinthony/SadTalker) can be run locally:
 
 ```bash
-## you need manually install TTS(https://github.com/coqui-ai/TTS) via `pip install tts` in advanced.
+## Text-to-speech in the Gradio demo uses Idiap's maintained coqui-tts fork (installed via requirements.txt).
 python app_sadtalker.py
 ```
 

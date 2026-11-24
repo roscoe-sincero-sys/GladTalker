@@ -1,20 +1,37 @@
 import os
 import tempfile
+
 from TTS.api import TTS
 
 
-class TTSTalker():
-    def __init__(self) -> None:
-        model_name = TTS().list_models()[0]
-        self.tts = TTS(model_name)
+DEFAULT_TTS_MODEL = "tts_models/en/ljspeech/tacotron2-DDC"
 
-    def test(self, text, language='en'):
 
-        tempf  = tempfile.NamedTemporaryFile(
-                delete = False,
-                suffix = ('.'+'wav'),
-            )
+class TTSTalker:
+    """Text-to-speech helper backed by Idiap's maintained Coqui TTS fork (coqui-tts)."""
 
-        self.tts.tts_to_file(text, speaker=self.tts.speakers[0], language=language, file_path=tempf.name)
+    def __init__(self, model_name=DEFAULT_TTS_MODEL) -> None:
+        self.model_name = model_name
+        self.tts = None
 
-        return tempf.name
+    def _ensure_loaded(self):
+        if self.tts is None:
+            self.tts = TTS(self.model_name)
+
+    def test(self, text, language="en"):
+        if not text or not text.strip():
+            return None
+
+        self._ensure_loaded()
+
+        fd, wav_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+
+        kwargs = {}
+        if getattr(self.tts, "is_multi_speaker", False) and self.tts.speakers:
+            kwargs["speaker"] = self.tts.speakers[0]
+        if getattr(self.tts, "is_multi_lingual", False) and language:
+            kwargs["language"] = language
+
+        self.tts.tts_to_file(text=text, file_path=wav_path, **kwargs)
+        return wav_path

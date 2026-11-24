@@ -1,12 +1,86 @@
 import os
 import sys
-import torch 
+import warnings
 
+import cv2
+import numpy as np
+import torch
 from tqdm import tqdm
 
 from src.utils.videoio import load_video_to_cv2
 
-import cv2
+
+class SpandrelFaceRestorer:
+    """Drop-in replacement for GFPGANer backed by spandrel + facexlib.
+
+    Works on Python 3.12-3.14 and PyTorch 2.x without requiring basicsr.
+    """
+
+    def __init__(self, model_path, upscale=2, bg_upsampler=None, device=None, model_rootpath='gfpgan/weights'):
+        import spandrel
+        from facexlib.utils import load_file_from_url
+        from facexlib.utils.face_restoration_helper import FaceRestoreHelper
+
+        self.upscale = upscale
+        self.bg_upsampler = bg_upsampler
+        self.device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+
+        if model_path.startswith('https://') or model_path.startswith('http://'):
+            model_path = load_file_from_url(
+                url=model_path,
+                model_dir=model_rootpath,
+                progress=True,
+                file_name=None,
+            )
+
+        self.model = spandrel.ModelLoader(device=self.device).load_from_file(model_path)
+        self.model.eval()
+
+        self.face_helper = FaceRestoreHelper(
+            upscale_factor=upscale,
+            face_size=512,
+            crop_ratio=(1, 1),
+            det_model='retinaface_resnet50',
+            save_ext='png',
+            use_parse=True,
+            device=self.device,
+            model_rootpath=model_rootpath,
+        )
+
+    @torch.no_grad()
+    def enhance(self, img, has_aligned=False, only_center_face=False, paste_back=True):
+        self.face_helper.clean_all()
+
+        if has_aligned:
+            img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_LINEAR)
+            self.face_helper.cropped_faces = [img]
+        else:
+            self.face_helper.read_image(img)
+            self.face_helper.get_face_landmarks_5(only_center_face=only_center_face, eye_dist_threshold=5)
+            self.face_helper.align_warp_face()
+
+        if not self.face_helper.cropped_faces:
+            return [], [], img
+
+        for cropped_face in self.face_helper.cropped_faces:
+            cropped_rgb = cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB)
+            cropped_t = torch.from_numpy(cropped_rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            output = self.model(cropped_t.to(self.device))
+            restored_rgb = (
+                output.squeeze(0).clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255.0
+            ).round().astype(np.uint8)
+            restored_bgr = cv2.cvtColor(restored_rgb, cv2.COLOR_RGB2BGR)
+            self.face_helper.add_restored_face(restored_bgr)
+
+        if not has_aligned and paste_back:
+            bg_img = None
+            if self.bg_upsampler is not None:
+                bg_img = self.bg_upsampler.enhance(img, outscale=self.upscale)[0]
+            self.face_helper.get_inverse_affine(None)
+            restored_img = self.face_helper.paste_faces_to_input_image(upsample_img=bg_img)
+            return self.face_helper.cropped_faces, self.face_helper.restored_faces, restored_img
+
+        return self.face_helper.cropped_faces, self.face_helper.restored_faces, None
 
 
 def _import_gfpgan():
@@ -34,15 +108,17 @@ class GeneratorWithLen(object):
     def __iter__(self):
         return self.gen
 
+
 def enhancer_list(images, method='gfpgan', bg_upsampler='realesrgan'):
     gen = enhancer_generator_no_len(images, method=method, bg_upsampler=bg_upsampler)
     return list(gen)
+
 
 def enhancer_generator_with_len(images, method='gfpgan', bg_upsampler='realesrgan'):
     """ Provide a generator with a __len__ method so that it can passed to functions that
     call len()"""
 
-    if os.path.isfile(images): # handle video to images
+    if not isinstance(images, list) and os.path.isfile(images):  # handle video to images
         # TODO: Create a generator version of load_video_to_cv2
         images = load_video_to_cv2(images)
 
@@ -50,17 +126,18 @@ def enhancer_generator_with_len(images, method='gfpgan', bg_upsampler='realesrga
     gen_with_len = GeneratorWithLen(gen, len(images))
     return gen_with_len
 
+
 def enhancer_generator_no_len(images, method='gfpgan', bg_upsampler='realesrgan'):
     """ Provide a generator function so that all of the enhanced images don't need
     to be stored in memory at the same time. This can save tons of RAM compared to
     the enhancer function. """
 
     print('face enhancer....')
-    if not isinstance(images, list) and os.path.isfile(images): # handle video to images
+    if not isinstance(images, list) and os.path.isfile(images):  # handle video to images
         images = load_video_to_cv2(images)
 
     # ------------------------ set up GFPGAN restorer ------------------------
-    if  method == 'gfpgan':
+    if method == 'gfpgan':
         arch = 'clean'
         channel_multiplier = 2
         model_name = 'GFPGANv1.4'
@@ -70,7 +147,7 @@ def enhancer_generator_no_len(images, method='gfpgan', bg_upsampler='realesrgan'
         channel_multiplier = 2
         model_name = 'RestoreFormer'
         url = 'https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/RestoreFormer.pth'
-    elif method == 'codeformer': # TODO:
+    elif method == 'codeformer':  # TODO:
         arch = 'CodeFormer'
         channel_multiplier = 2
         model_name = 'CodeFormer'
@@ -78,58 +155,71 @@ def enhancer_generator_no_len(images, method='gfpgan', bg_upsampler='realesrgan'
     else:
         raise ValueError(f'Wrong model version {method}.')
 
-
     # ------------------------ set up background upsampler ------------------------
     if bg_upsampler == 'realesrgan':
         if not torch.cuda.is_available():  # CPU
-            import warnings
-            warnings.warn('The unoptimized RealESRGAN is slow on CPU. We do not use it. '
-                          'If you really want to use it, please modify the corresponding codes.')
+            warnings.warn(
+                'The unoptimized RealESRGAN is slow on CPU. We do not use it. '
+                'If you really want to use it, please modify the corresponding codes.'
+            )
             bg_upsampler = None
         else:
-            from basicsr.archs.rrdbnet_arch import RRDBNet
-            from realesrgan import RealESRGANer
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
-            bg_upsampler = RealESRGANer(
-                scale=2,
-                model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth',
-                model=model,
-                tile=400,
-                tile_pad=10,
-                pre_pad=0,
-                half=True)  # need to set False in CPU mode
+            try:
+                from basicsr.archs.rrdbnet_arch import RRDBNet
+                from realesrgan import RealESRGANer
+                model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+                bg_upsampler = RealESRGANer(
+                    scale=2,
+                    model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth',
+                    model=model,
+                    tile=400,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=True,
+                )
+            except ImportError:
+                warnings.warn('RealESRGAN / basicsr not installed; skipping background upsampler.')
+                bg_upsampler = None
     else:
         bg_upsampler = None
 
     # determine model paths
     model_path = os.path.join('gfpgan/weights', model_name + '.pth')
-    
+
     if not os.path.isfile(model_path):
         model_path = os.path.join('checkpoints', model_name + '.pth')
-    
+
     if not os.path.isfile(model_path):
         # download pre-trained models from url
         model_path = url
 
-    GFPGANer = _import_gfpgan()
-    restorer = GFPGANer(
-        model_path=model_path,
-        upscale=2,
-        arch=arch,
-        channel_multiplier=channel_multiplier,
-        bg_upsampler=bg_upsampler)
+    try:
+        restorer = SpandrelFaceRestorer(
+            model_path=model_path,
+            upscale=2,
+            bg_upsampler=bg_upsampler,
+        )
+    except ImportError:
+        GFPGANer = _import_gfpgan()
+        restorer = GFPGANer(
+            model_path=model_path,
+            upscale=2,
+            arch=arch,
+            channel_multiplier=channel_multiplier,
+            bg_upsampler=bg_upsampler,
+        )
 
     # ------------------------ restore ------------------------
     for idx in tqdm(range(len(images)), 'Face Enhancer:'):
-        
         img = cv2.cvtColor(images[idx], cv2.COLOR_RGB2BGR)
-        
+
         # restore faces and background if necessary
         cropped_faces, restored_faces, r_img = restorer.enhance(
             img,
             has_aligned=False,
             only_center_face=False,
-            paste_back=True)
-        
+            paste_back=True,
+        )
+
         r_img = cv2.cvtColor(r_img, cv2.COLOR_BGR2RGB)
         yield r_img
