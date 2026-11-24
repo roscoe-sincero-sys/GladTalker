@@ -90,38 +90,38 @@ Community tutorials: [中文Windows教程 (Chinese Windows tutorial)](https://ww
 
 ### Linux/Unix
 
-1. Install [Anaconda](https://www.anaconda.com/), Python and `git`.
+1. Install [Python 3.10+](https://www.python.org/downloads/) (tested on Python 3.14), `git`, and `ffmpeg`.
 
-2. Creating the env and install the requirements.
+2. Create a virtual environment and install the requirements:
   ```bash
   git clone https://github.com/OpenTalker/SadTalker.git
 
-  cd SadTalker 
+  cd SadTalker
 
-  conda create -n sadtalker python=3.8
+  python3 -m venv venv
+  source venv/bin/activate
 
-  conda activate sadtalker
-
-  pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu113
-
-  conda install ffmpeg
+  # Install PyTorch (see https://pytorch.org/get-started/locally/ for CUDA/ROCm/CPU options)
+  pip install torch torchvision torchaudio
 
   pip install -r requirements.txt
-
-  ### Coqui TTS is optional for gradio demo. 
-  ### pip install TTS
-
-  ```  
+  ```
 ### Windows
 
 A video tutorial in chinese is available [here](https://www.bilibili.com/video/BV1Dc411W7V6/). You can also follow the following instructions:
 
-1. Install [Python 3.8](https://www.python.org/downloads/windows/) and check "Add Python to PATH".
+1. Install [Python 3.10+](https://www.python.org/downloads/windows/) (tested on Python 3.14) and check "Add Python to PATH".
 2. Install [git](https://git-scm.com/download/win) manually or using [Scoop](https://scoop.sh/): `scoop install git`.
 3. Install `ffmpeg`, following [this tutorial](https://www.wikihow.com/Install-FFmpeg-on-Windows) or using [scoop](https://scoop.sh/): `scoop install ffmpeg`.
-4. Download the SadTalker repository by running `git clone https://github.com/Winfredy/SadTalker.git`.
-5. Download the checkpoints and gfpgan models in the [downloads section](#2-download-models).
-6. Run `start.bat` from Windows Explorer as normal, non-administrator, user, and a Gradio-powered WebUI demo will be started.
+4. Clone the repository and download the checkpoints and gfpgan models in the [downloads section](#2-download-models).
+5. Create a virtual environment and install dependencies (or double-click `webui.bat` to set up and launch the Gradio WebUI):
+   ```powershell
+   python -m venv venv
+   .\venv\Scripts\activate
+   # CPU-only PyTorch (or choose a CUDA build at https://pytorch.org/get-started/locally/)
+   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+   pip install -r requirements.txt
+   ```
 
 ### macOS
 

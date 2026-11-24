@@ -5,13 +5,11 @@ This method has been tested on a M1 Mac (13.3)
 ```bash
 git clone https://github.com/OpenTalker/SadTalker.git
 cd SadTalker 
-conda create -n sadtalker python=3.8
-conda activate sadtalker
-# install pytorch 2.0
+python3 -m venv venv
+source venv/bin/activate
 pip install torch torchvision torchaudio
-conda install ffmpeg
+brew install ffmpeg
 pip install -r requirements.txt
-pip install dlib # macOS needs to install the original dlib.
 ```
 
 ### Windows Native

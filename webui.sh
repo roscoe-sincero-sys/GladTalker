@@ -3,7 +3,7 @@
 
 # If run from macOS, load defaults from webui-macos-env.sh
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    export TORCH_COMMAND="pip install torch==1.12.1 torchvision==0.13.1"
+    export TORCH_COMMAND="pip install torch torchvision torchaudio"
 fi
 
 # python3 executable
@@ -92,7 +92,7 @@ case "$gpu_info" in
 esac
 if echo "$gpu_info" | grep -q "AMD" && [[ -z "${TORCH_COMMAND}" ]]
 then
-    export TORCH_COMMAND="pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/rocm5.2"
+    export TORCH_COMMAND="pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2"
 fi  
 
 for preq in "${GIT}" "${python_cmd}"

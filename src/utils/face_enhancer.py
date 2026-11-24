@@ -1,13 +1,24 @@
 import os
+import sys
 import torch 
-
-from gfpgan import GFPGANer
 
 from tqdm import tqdm
 
 from src.utils.videoio import load_video_to_cv2
 
 import cv2
+
+
+def _import_gfpgan():
+    # basicsr 1.4.2 imports torchvision.transforms.functional_tensor, removed in torchvision 0.17+
+    if 'torchvision.transforms.functional_tensor' not in sys.modules:
+        try:
+            import torchvision.transforms.functional_tensor  # noqa: F401
+        except ImportError:
+            import torchvision.transforms.functional as _tv_functional
+            sys.modules['torchvision.transforms.functional_tensor'] = _tv_functional
+    from gfpgan import GFPGANer
+    return GFPGANer
 
 
 class GeneratorWithLen(object):
@@ -100,6 +111,7 @@ def enhancer_generator_no_len(images, method='gfpgan', bg_upsampler='realesrgan'
         # download pre-trained models from url
         model_path = url
 
+    GFPGANer = _import_gfpgan()
     restorer = GFPGANer(
         model_path=model_path,
         upscale=2,
