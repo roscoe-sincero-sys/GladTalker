@@ -1,3 +1,5 @@
+> **GladTalker** is a fork of [OpenTalker/SadTalker](https://github.com/OpenTalker/SadTalker), licensed under the [Apache License 2.0](LICENSE). All original copyright and license notices are retained. Changes made in this fork are noted in the commit history.
+
 <div align="center">
 
 <img src='https://user-images.githubusercontent.com/4397546/229094115-862c747e-7397-4b54-ba4a-bd368bfe2e0f.png' width='500px'/>
