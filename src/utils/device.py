@@ -3,6 +3,35 @@
 import os
 import torch
 
+_dml_compat_installed = False
+
+
+def enable_directml_compat() -> None:
+    """Install lightweight CPU-fallback shims for ops unsupported on DirectML (e.g. 5D conv3d)."""
+    global _dml_compat_installed
+    if _dml_compat_installed:
+        return
+    import torch.nn.functional as F
+
+    _orig_conv3d = F.conv3d
+
+    def _dml_safe_conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
+        if input.device.type == "privateuseone":
+            out = _orig_conv3d(
+                input.cpu(),
+                weight.cpu(),
+                bias.cpu() if bias is not None else None,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+            )
+            return out.to(input.device)
+        return _orig_conv3d(input, weight, bias, stride=stride, padding=padding, dilation=dilation, groups=groups)
+
+    F.conv3d = _dml_safe_conv3d
+    _dml_compat_installed = True
+
 
 def _import_directml():
     try:
@@ -71,6 +100,7 @@ def get_device(prefer_cpu: bool = False, device_arg=None) -> torch.device:
             idx = int(spec.split(":", 1)[1])
         else:
             idx = _pick_directml_index(dml)
+        enable_directml_compat()
         return dml.device(idx)
 
     if spec == "mps":
@@ -87,6 +117,7 @@ def get_device(prefer_cpu: bool = False, device_arg=None) -> torch.device:
 
     dml = _import_directml()
     if dml is not None and dml.is_available():
+        enable_directml_compat()
         return dml.device(_pick_directml_index(dml))
 
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():

@@ -34,7 +34,9 @@ class SpandrelFaceRestorer:
                 file_name=None,
             )
 
-        self.model = spandrel.ModelLoader(device=self.device).load_from_file(model_path)
+        # Load on CPU first then move to target device (avoids torch.load map_location bug on DirectML)
+        self.model = spandrel.ModelLoader(device=torch.device('cpu')).load_from_file(model_path)
+        self.model.to(self.device)
         self.model.eval()
 
         self.face_helper = FaceRestoreHelper(
@@ -66,7 +68,12 @@ class SpandrelFaceRestorer:
         for cropped_face in self.face_helper.cropped_faces:
             cropped_rgb = cv2.cvtColor(cropped_face, cv2.COLOR_BGR2RGB)
             cropped_t = torch.from_numpy(cropped_rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-            output = self.model(cropped_t.to(self.device))
+            inp = cropped_t.to(self.device)
+            if self.device.type == 'privateuseone':
+                # DirectML + PyTorch 2.4 raises on spandrel's @torch.inference_mode(); use @torch.no_grad()
+                output = self.model._call_fn(self.model.model, inp)
+            else:
+                output = self.model(inp)
             restored_rgb = (
                 output.squeeze(0).clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255.0
             ).round().astype(np.uint8)
