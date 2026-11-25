@@ -8,7 +8,10 @@ screened by a pure ASGI guard *before* FastAPI parses its body:
   from the page, while the side effect (a render, a download) would still happen.
 * **Token**: when configured, every route except ``/health`` needs it (``Authorization: Bearer``
   or ``X-GladTalker-Token``). Checked before the body is read, so unauthenticated uploads are
-  never spooled to disk.
+  never spooled to disk. The one exception is the bundled UI's own files (``public_paths``,
+  GET/HEAD only): a browser can't attach a header to the page load, and the page has to load
+  before it can read its ``#token=`` fragment. Those files are the same for every install and
+  hold no user data; uploads, job media, and every API route still need the token.
 * **Body size**: ``Content-Length`` is checked up front and streamed bodies are counted as they
   arrive, so oversized uploads are cut off at the limit.
 
@@ -25,7 +28,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
 TICKET_TTL_S = 60.0
@@ -62,11 +65,20 @@ class StudioGuard:
     """ASGI middleware enforcing Origin, token, and body-size rules on HTTP requests."""
 
     def __init__(self, app, *, allowed_origins: list[str], token: Optional[str],
-                 body_limit_for: Callable[[str], int]):
+                 body_limit_for: Callable[[str], int], public_paths: Iterable[str] = ()):
         self.app = app
         self.allowed_origins = allowed_origins
         self.token = token
         self.body_limit_for = body_limit_for
+        self.public_paths = frozenset(public_paths)
+
+    def _needs_token(self, scope) -> bool:
+        if not self.token or scope.get("method") == "OPTIONS":
+            return False
+        path = scope.get("path", "")
+        if path in OPEN_PATHS:
+            return False
+        return not (scope.get("method") in ("GET", "HEAD") and path in self.public_paths)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -76,7 +88,7 @@ class StudioGuard:
         if not origin_allowed(_header(scope, b"origin"), _header(scope, b"host"), self.allowed_origins):
             return await _reject(send, 403, "This origin is not allowed to use GladTalker Studio.")
 
-        if self.token and path not in OPEN_PATHS and scope.get("method") != "OPTIONS":
+        if self._needs_token(scope):
             supplied = _header(scope, b"x-gladtalker-token")
             auth = _header(scope, b"authorization") or ""
             if auth.lower().startswith("bearer "):

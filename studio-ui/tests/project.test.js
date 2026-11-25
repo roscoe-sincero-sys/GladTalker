@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultProject, normalizeProject, loadProject, saveProject, renderRequest, audioPreviewRequest,
-  nextStyleIndex, STORAGE_KEY, PROJECT_VERSION,
+  nextStyleIndex, STORAGE_KEY, PROJECT_VERSION, projectGuard, replaceProject, MAX_CAST,
 } from '../src/lib/project.svelte.js';
-import { renderProblems, problemsForStep } from '../src/lib/validate.js';
+import { renderProblems, problemsForStep, audioProblems } from '../src/lib/validate.js';
 import { moveLine, linesFromParse, nameKey } from '../src/lib/script-lines.js';
 import { duration, signed, pacingLabel, timestamp } from '../src/lib/format.js';
 
@@ -92,6 +92,38 @@ describe('render checklist (WCAG 3.3.1 / 3.3.3)', () => {
   });
   it('asks for an image, cast, and script when starting from scratch', () => {
     expect(renderProblems(defaultProject()).map((x) => x.fieldId)).toEqual(['scene-file', 'auto-cast', 'script-import']);
+  });
+  it('applies the engine’s limits: 8 cast members, 500 lines, 1000 characters a line', () => {
+    const p = sample();
+    for (let i = 3; i <= MAX_CAST + 1; i++) {
+      p.cast.push({ id: `c${i}`, name: `Extra ${i}`, region: { x: 0, y: 0, w: 40, h: 40 }, voice: 'neutral', semitones: 0, style: i });
+    }
+    p.script[0].text = 'x'.repeat(1001);
+    for (let i = 3; i <= 501; i++) p.script.push({ id: `l${i}`, castId: 'c1', text: 'Hi.' });
+    const problems = renderProblems(p, { models: { complete: true }, ffmpeg: true });
+    expect(problems.map((x) => [x.step, x.fieldId])).toEqual([
+      ['cast', 'name-c9'], ['script', 'text-l501'], ['script', 'text-l1'],
+    ]);
+    expect(problems[0].message).toMatch(/up to 8 cast members\. Remove 1 \(there are 9\)/);
+    expect(audioProblems(p)).toEqual(problems); // the full-mix preview is held to the same limits
+  });
+  it('checks the audio preview without needing a scene image or valid regions', () => {
+    const p = sample();
+    p.image = null;
+    p.cast[0].region.x = 99999;
+    expect(audioProblems(p)).toEqual([]);
+    p.script[1].castId = null;
+    expect(audioProblems(p).map((x) => x.fieldId)).toEqual(['speaker-l2']);
+  });
+});
+
+describe('project replacement guard', () => {
+  it('invalidates work started before New/Open replaced the project', () => {
+    const before = projectGuard();
+    expect(before()).toBe(true);
+    replaceProject(defaultProject());
+    expect(before()).toBe(false);
+    expect(projectGuard()()).toBe(true);
   });
 });
 

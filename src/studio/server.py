@@ -30,6 +30,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -76,6 +77,7 @@ FILE_KINDS = {"video": ("video_path", "video/mp4"), "srt": ("srt_path", "applica
               "vtt": ("vtt_path", "text/vtt"), "audio": ("audio_path", "audio/wav")}
 UPLOAD_NAME_RE = re.compile(r"^[0-9a-f]{32}\.(png|jpg|jpeg|bmp|webp)$")
 UI_DIST = REPO_ROOT / "studio-ui" / "dist"
+PREVIEW_KEEP = 5  # finished audio previews kept on disk (older ones are deleted)
 # The Studio UI only loads its own files; it talks to this engine (fetch + WebSocket) and shows
 # uploaded images and rendered media through blob: URLs.
 UI_HEADERS = [
@@ -154,6 +156,8 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
     tickets = TicketStore()
     upload_limit = config.max_upload_mb * 1024 * 1024 + 64 * 1024  # file + multipart overhead
 
+    serve_ui = (UI_DIST / "index.html").is_file()
+
     # Middleware runs outermost-last-added: Host check -> CORS (answers preflights) -> guard
     # (Origin, token, body size), all before FastAPI parses a request body.
     app.add_middleware(
@@ -161,6 +165,7 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
         allowed_origins=config.allowed_origins,
         token=config.token,
         body_limit_for=lambda path: upload_limit if path == "/uploads" else DEFAULT_BODY_LIMIT,
+        public_paths=ui_public_paths(UI_DIST) if serve_ui else (),
     )
     app.add_middleware(
         CORSMiddleware,
@@ -291,7 +296,9 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
         pipeline.require_ffmpeg_user_facing()
 
         def run(ctx):
-            out_dir = workspace / "previews" / f"{time.strftime('%Y%m%d_%H%M%S')}_{ctx.job.id}"
+            previews = workspace / "previews"
+            prune_previews(previews, services.jobs, keep=PREVIEW_KEEP, current=ctx.job.id)
+            out_dir = previews / f"{time.strftime('%Y%m%d_%H%M%S')}_{ctx.job.id}"
             return pipeline.preview_audio(ctx, body, out_dir, services.tts)
 
         return services.jobs.submit("audio.preview", "Preview audio mix", run, lane="audio").snapshot()
@@ -427,13 +434,49 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
                 except RuntimeError:
                     pass
 
-    if (UI_DIST / "index.html").is_file():
+    if serve_ui:
         # Mounted last so every API route above takes precedence.
         from fastapi.staticfiles import StaticFiles
 
         app.mount("/", _with_headers(StaticFiles(directory=UI_DIST, html=True), UI_HEADERS), name="ui")
 
     return app
+
+
+def ui_public_paths(dist: Path) -> set[str]:
+    """URL paths of the bundled UI's files (and ``/``), which load without the engine token."""
+    paths = {"/"}
+    for f in dist.rglob("*"):
+        if f.is_file():
+            paths.add("/" + f.relative_to(dist).as_posix())
+    return paths
+
+
+def prune_previews(previews: Path, jobs: JobManager, keep: int, current: str) -> None:
+    """Delete audio previews nobody can fetch any more, so repeated previews don't fill the disk.
+
+    A preview's WAV is only served through its (in-memory) job, so folders whose job is gone
+    (evicted, or from an earlier engine run) are removed, and of the rest only the newest
+    ``keep`` finished previews stay. Queued/running previews are never touched.
+    """
+    if not previews.is_dir():
+        return
+    known = {j.id: j for j in jobs.list()}
+    finished = []
+    for folder in previews.iterdir():
+        if not folder.is_dir():
+            continue
+        job_id = folder.name.rsplit("_", 1)[-1]
+        job = known.get(job_id)
+        if job_id == current or (job is not None and not job.done):
+            continue
+        if job is None:
+            shutil.rmtree(folder, ignore_errors=True)
+        else:
+            finished.append(folder)
+    finished.sort(key=lambda f: f.name)  # names start with a timestamp
+    for folder in finished[:max(0, len(finished) - keep)]:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _with_headers(asgi_app, headers):

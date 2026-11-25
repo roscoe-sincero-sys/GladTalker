@@ -8,6 +8,7 @@ import DialogueRow from '../src/components/DialogueRow.svelte';
 import Stepper from '../src/components/Stepper.svelte';
 import JobProgress from '../src/components/JobProgress.svelte';
 import { nav } from '../src/lib/app-state.svelte.js';
+import { reactive } from './state.svelte.js';
 
 async function violations(container) {
   const res = await axe.run(container, {
@@ -45,7 +46,7 @@ describe('DialogueRow', () => {
   const cast = [{ id: 'c1', name: 'Brain', style: 0 }, { id: 'c2', name: 'Pinky', style: 1 }];
   let props;
   beforeEach(() => {
-    props = { line: { id: 'l2', castId: 'c1', text: "You're late." }, index: 1, total: 3, cast,
+    props = { line: reactive({ id: 'l2', castId: 'c1', text: "You're late." }), index: 1, total: 3, cast,
       warnings: [{ code: 'tts_contraction', message: 'Say “your”.', fix: 'your late.' }],
       onmove: vi.fn(), ondelete: vi.fn(), onplay: vi.fn(), onfix: vi.fn() };
   });
@@ -66,6 +67,12 @@ describe('DialogueRow', () => {
     expect(props.onmove).toHaveBeenCalledTimes(2); // plain arrows are left alone (WCAG 2.1.4)
   });
 
+  it('gives the move buttons ids, so focus can be put back after a reorder', () => {
+    renderRow();
+    expect(screen.getByRole('button', { name: 'Move line 2 up' }).id).toBe('up-l2');
+    expect(screen.getByRole('button', { name: 'Move line 2 down' }).id).toBe('down-l2');
+  });
+
   it('offers the lint fix and labels every control', async () => {
     const { container } = renderRow();
     await fireEvent.click(screen.getByRole('button', { name: /Auto-Fix/ }));
@@ -76,7 +83,7 @@ describe('DialogueRow', () => {
   });
 
   it('marks a missing speaker and empty text as errors', () => {
-    props.line = { id: 'l9', castId: null, text: ' ' };
+    props.line = reactive({ id: 'l9', castId: null, text: ' ' });
     props.warnings = [];
     renderRow();
     expect(screen.getByLabelText('Speaker for line 2').getAttribute('aria-invalid')).toBe('true');

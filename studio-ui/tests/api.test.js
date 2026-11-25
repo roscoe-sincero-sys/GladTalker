@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createApi, readEngineToken, ApiError, basename } from '../src/lib/api.js';
+import { createApi, readEngineToken, ApiError, basename, revokeMedia } from '../src/lib/api.js';
 
 const json = (status, body) => ({ ok: status < 400, status, json: async () => body, blob: async () => new Blob(['x']) });
 
@@ -36,6 +36,15 @@ describe('requests', () => {
     const [, init] = fetchImpl.mock.calls[0];
     expect(init.body).toBeInstanceOf(FormData);
     expect(init.headers['Content-Type']).toBeUndefined();
+  });
+
+  it('releases blob: media URLs and leaves plain URLs alone', () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+    revokeMedia('/jobs/j/files/video');
+    revokeMedia('');
+    revokeMedia('blob:http://x/123');
+    expect(revoke.mock.calls).toEqual([['blob:http://x/123']]);
+    revoke.mockRestore();
   });
 
   it('builds media URLs from upload paths on any OS', async () => {
@@ -97,5 +106,60 @@ describe('watchJob', () => {
     await vi.waitFor(() => expect(FakeSocket.last?.url).toContain('/ws/jobs/j2'));
     FakeSocket.last.close(); // refused before any event
     expect((await watch.done).state).toBe('succeeded');
+  });
+
+  it('stops with an error when the job is gone (engine restarted or job evicted)', async () => {
+    const fetchImpl = vi.fn(async () => json(404, { detail: "No job with id 'j3'." }));
+    const api = createApi({ fetchImpl, WebSocketImpl: null });
+    const watch = api.watchJob('j3', () => {}, { pollMs: 1 });
+    await expect(watch.done).rejects.toMatchObject({ name: 'ApiError', status: 404, message: "No job with id 'j3'." });
+    const calls = fetchImpl.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchImpl.mock.calls.length).toBe(calls); // and stops polling
+  });
+
+  it('also stops when the ticket request is refused (wrong token)', async () => {
+    const fetchImpl = vi.fn(async () => json(401, { detail: 'Missing or invalid Studio token.' }));
+    const api = createApi({ fetchImpl, WebSocketImpl: FakeSocket, location: { protocol: 'http:', host: 'h' } });
+    await expect(api.watchJob('j4', () => {}).done).rejects.toMatchObject({ status: 401 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('backs off while the engine is unreachable, then carries on', async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const fetchImpl = vi.fn(async () => {
+        n++;
+        if (n <= 3) throw new TypeError('Failed to fetch');
+        return json(200, { id: 'j5', state: 'succeeded' });
+      });
+      const api = createApi({ fetchImpl, WebSocketImpl: null });
+      const watch = api.watchJob('j5', () => {}, { pollMs: 100 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(n).toBe(1);
+      await vi.advanceTimersByTimeAsync(199);
+      expect(n).toBe(1); // waits 200 ms after the first failure, not 100
+      await vi.advanceTimersByTimeAsync(1);
+      expect(n).toBe(2);
+      await vi.advanceTimersByTimeAsync(400); // then 400 ms
+      expect(n).toBe(3);
+      await vi.advanceTimersByTimeAsync(800); // then 800 ms
+      expect((await watch.done).state).toBe('succeeded');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('close() resolves with null and stops all traffic', async () => {
+    const fetchImpl = vi.fn(async () => json(200, { id: 'j6', state: 'running' }));
+    const api = createApi({ fetchImpl, WebSocketImpl: null });
+    const watch = api.watchJob('j6', () => {}, { pollMs: 1 });
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
+    watch.close();
+    expect(await watch.done).toBeNull();
+    const calls = fetchImpl.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchImpl.mock.calls.length).toBe(calls);
   });
 });

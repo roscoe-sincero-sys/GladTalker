@@ -4,6 +4,12 @@
 
 export const STORAGE_KEY = 'gladtalker.project.v1';
 export const PROJECT_VERSION = 1;
+// The engine's request limits (src/studio/schemas.py), checked here so the UI never offers a
+// project the engine would reject.
+export const MAX_CAST = 8;
+export const MAX_LINES = 500;
+export const MAX_LINE_CHARS = 1000;
+export const MAX_NAME_CHARS = 64;
 
 let nextId = 1;
 export const newId = (prefix) => `${prefix}${Date.now().toString(36)}${(nextId++).toString(36)}`;
@@ -58,8 +64,13 @@ export function loadProject(storage = globalThis.localStorage) {
 }
 
 export function saveProject(project, storage = globalThis.localStorage) {
+  return saveProjectText(JSON.stringify(project), storage);
+}
+
+/** Store an already-serialized project (autosave serializes once to see what changed). */
+export function saveProjectText(text, storage = globalThis.localStorage) {
   try {
-    storage?.setItem(STORAGE_KEY, JSON.stringify(project));
+    storage?.setItem(STORAGE_KEY, text);
     return true;
   } catch {
     return false; // private mode / quota: the session still works, it just won't persist
@@ -68,9 +79,21 @@ export function saveProject(project, storage = globalThis.localStorage) {
 
 export const project = $state(loadProject());
 
+// Bumped whenever New/Open replaces the project. Anything that awaits the engine and then writes
+// to the project captures a guard first and drops its result if the project was replaced in the
+// meantime, so a slow import or detection never lands in a different project.
+let generation = 0;
+
+/** Returns a check that stays true until the project is replaced. */
+export function projectGuard() {
+  const mine = generation;
+  return () => mine === generation;
+}
+
 /** Replace the whole project in place (keeps the reactive object identity). */
 export function replaceProject(next) {
   const normalized = normalizeProject(next);
+  generation++;
   for (const key of Object.keys(project)) delete project[key];
   Object.assign(project, normalized);
 }

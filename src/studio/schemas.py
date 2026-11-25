@@ -39,10 +39,11 @@ class Region(_Model):
         return cls(x=x1, y=y1, w=max(1, int(round(x2)) - x1), h=max(1, int(round(y2)) - y1))
 
 
-class CastMember(_Model):
+class _Named(_Model):
+    """A cast member's name: surrounding whitespace is dropped and blank names are rejected, the
+    same for renders and audio previews."""
+
     name: str = Field(min_length=1, max_length=64)
-    region: Region
-    semitones: float = Field(0.0, ge=MIN_SEMITONES, le=MAX_SEMITONES)
 
     @field_validator("name")
     @classmethod
@@ -51,6 +52,11 @@ class CastMember(_Model):
         if not v:
             raise ValueError("Cast member name must not be blank.")
         return v
+
+
+class CastMember(_Named):
+    region: Region
+    semitones: float = Field(0.0, ge=MIN_SEMITONES, le=MAX_SEMITONES)
 
 
 class DialogueLine(_Model):
@@ -148,8 +154,7 @@ def _link_script_to_cast(cast_names: list[str], script: list["DialogueLine"]) ->
         line.speaker = canonical
 
 
-class Voice(_Model):
-    name: str = Field(min_length=1, max_length=64)
+class Voice(_Named):
     semitones: float = Field(0.0, ge=MIN_SEMITONES, le=MAX_SEMITONES)
 
 

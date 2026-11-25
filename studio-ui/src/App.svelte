@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { STEPS, engine, nav, connectEngine, goTo, deviceLabel } from './lib/app-state.svelte.js';
-  import { project, saveProject, replaceProject, defaultProject } from './lib/project.svelte.js';
+  import { project, saveProjectText, replaceProject, defaultProject } from './lib/project.svelte.js';
   import { live, announce, announceError } from './lib/announce.svelte.js';
   import { renderProblems, problemsForStep } from './lib/validate.js';
   import Stepper from './components/Stepper.svelte';
@@ -21,7 +21,7 @@
   $effect(() => {
     const snapshot = JSON.stringify(project);
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => saveProject(JSON.parse(snapshot)), 300);
+    saveTimer = setTimeout(() => saveProjectText(snapshot), 300);
     return () => clearTimeout(saveTimer);
   });
 

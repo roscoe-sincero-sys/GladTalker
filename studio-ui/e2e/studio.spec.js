@@ -1,5 +1,6 @@
 // End-to-end: the built Studio UI against a real engine (see playwright.config.js).
 import { test, expect } from '@playwright/test';
+import { E2E_TOKEN } from '../playwright.config.js';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -101,6 +102,83 @@ test('cast → script → preview mix, with keyboard-only editing', async ({ pag
   await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Script/ }).click();
   await expect(page.getByLabel('What is said in line 1')).toHaveValue('your doing great.');
 
+  expect(errors).toEqual([]);
+});
+
+test('reorder buttons keep keyboard focus at the top and bottom of the list (WCAG 2.4.3)', async ({ page }) => {
+  await openStudio(page);
+  await castPortrait(page);
+  await page.getByRole('button', { name: 'Next: Script' }).click();
+  await page.getByLabel('Paste a script').fill('Ann: One.\nAnn: Two.\nAnn: Three.');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByText('Imported 3 lines')).toBeVisible();
+
+  // Line 2 up with Space: it becomes line 1, whose Up button is now disabled.
+  await page.getByRole('button', { name: 'Move line 2 up' }).focus();
+  await page.keyboard.press('Space');
+  await expect(page.getByLabel('What is said in line 1')).toHaveValue('Two.');
+  await expect(page.getByRole('button', { name: 'Move line 1 down' })).toBeFocused();
+
+  // Down twice with Enter: it ends up last, and focus stays on that line (its Up button).
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Move line 2 down' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByLabel('What is said in line 3')).toHaveValue('Two.');
+  await expect(page.getByRole('button', { name: 'Move line 3 up' })).toBeFocused();
+});
+
+test('a slow import never lands in a project opened meanwhile', async ({ page }) => {
+  await openStudio(page);
+  await castPortrait(page);
+  await page.getByRole('button', { name: 'Next: Script' }).click();
+
+  let releaseParse;
+  const parseHeld = new Promise((r) => (releaseParse = r));
+  await page.route('**/script/parse', async (route) => {
+    await parseHeld;
+    await route.continue();
+  });
+  await page.getByLabel('Paste a script').fill('Ann: This belongs to project A.');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+
+  // While project A's import is still waiting for the engine, open project B.
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Open…' }).click();
+  await (await chooser).setFiles({ name: 'b.gladtalker.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
+    version: 1,
+    cast: [{ id: 'cb', name: 'Bea', region: { x: 0, y: 0, w: 64, h: 64 } }],
+    script: [{ id: 'lb', castId: 'cb', text: 'Project B line.' }],
+  })) });
+  await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
+
+  const parsed = page.waitForResponse('**/script/parse');
+  releaseParse();
+  await parsed;
+  await page.waitForTimeout(700); // past the autosave delay
+  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Script/ }).click();
+  await expect(page.getByLabel('What is said in line 1')).toHaveValue('Project B line.');
+  await expect(page.getByLabel('What is said in line 2')).toHaveCount(0);
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('gladtalker.project.v1')));
+  expect(saved.script.map((l) => l.text)).toEqual(['Project B line.']);
+});
+
+test('token mode: the documented #token= link loads the app and authenticates it', async ({ page, request }) => {
+  const base = `http://127.0.0.1:${Number(process.env.GLADTALKER_E2E_PORT || 7863) + 1}`;
+  // Without the token, the shell loads but the engine's data doesn't.
+  expect((await request.get(`${base}/`)).status()).toBe(200);
+  expect((await request.get(`${base}/hardware`)).status()).toBe(401);
+
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  await page.goto(`${base}/#token=${E2E_TOKEN}`);
+  await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
+  await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible();
+  expect(new URL(page.url()).hash).toBe(''); // the token left the address bar
+  // An upload and the authenticated image fetch (a blob: URL) both work.
+  await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
+  const img = page.getByRole('img', { name: /Scene: people_0\.png/ });
+  await expect(img).toBeVisible();
+  expect(await img.evaluate((el) => el.src.startsWith('blob:') && el.naturalWidth > 0)).toBe(true);
   expect(errors).toEqual([]);
 });
 

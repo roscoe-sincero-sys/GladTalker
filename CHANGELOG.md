@@ -26,9 +26,24 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
     - drag alternatives everywhere, ≥ 36 px targets, and a focus ring never hidden by sticky bars;
     - verified contrast in light and dark, forced-colors, reduced motion, and 320 px reflow.
 - Engine endpoints for the UI: `GET /uploads/{name}`, `POST /script/lint`, and `POST /audio/preview` (a job that builds the render's exact soundtrack; WAV via `/jobs/{id}/files/audio`). UI responses carry a strict Content-Security-Policy and `nosniff`.
+- UI robustness:
+  - Async results (import, upload, detection, render start) are dropped if New/Open replaced the project meanwhile.
+  - Job watchers stop on 401/403/404, back off on network errors, and close when their step closes.
+  - `blob:` media URLs are released, and voice clips play one at a time.
+  - The engine's limits (8 cast members, 500 lines, 1000 characters a line) are checked in the UI, and the checklist and audio preview say where to fix them.
+  - Reordering keeps keyboard focus at the ends of the list.
+  - Downloads keep their file names in token mode.
+- Audio previews no longer pile up on disk. Previews whose job is gone are deleted, and the 5 newest finished previews are kept.
 - UI tests:
-  - 50 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
-  - Playwright end-to-end tests against a real engine: axe WCAG 2.2 A/AA scans of every step in light and dark, keyboard region editing and line reordering, a real audio-mix preview, autosave across reload, Help dialog focus, 320 px reflow, and an opt-in real render.
+  - 61 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
+  - Playwright end-to-end tests against a real engine:
+    - axe WCAG 2.2 A/AA scans of every step in light and dark;
+    - keyboard region editing, and line reordering with focus kept at the ends of the list;
+    - a real audio-mix preview and autosave across reload;
+    - a slow import racing an Open project;
+    - the `#token=` launch against a token-protected engine;
+    - Help dialog focus and 320 px reflow;
+    - an opt-in real render.
 - **GladTalker Studio engine (phase 1 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio_server.py` + `src/studio/`, a local FastAPI + WebSocket backend for the upcoming *Cast → Script → Roll* UI ([docs/studio_api.md](docs/studio_api.md)):
   - `/hardware` (device, every CUDA/ROCm/DirectML/MPS GPU, FFmpeg, model readiness) and `/models` + `/models/download` (download job with per-file byte progress).
   - `/cast/detect`: RetinaFace auto-cast tuned for stylized faces (permissive threshold + 2× pass), reading-order badges, and region suggestions that snap to video-call tiles / comic panels.
@@ -48,7 +63,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached per file, bound to the hashed file's own size, mtime, and file ID (read from the open handle and re-checked against the path), with a racy-timestamp guard.
   - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (137 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (142 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.
@@ -64,6 +79,9 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 
 ### Fixed
 - DirectML device names no longer include a trailing NUL character in `describe_device()`.
+- The audio pipeline closes every WAV file it opens (pydub left them open, which on Windows could keep temporary work folders from being deleted).
+- Renders and audio previews without coqui-tts installed now fail with an install hint instead of "Something went wrong: No module named 'TTS'".
+- `POST /audio/preview` trims cast names and rejects blank ones, the same as `POST /render/start`.
 - Renders no longer fail when the image or workspace path contains non-ASCII characters on Windows (`preprocess.py` and `paste_pic.py` now use Unicode-safe image I/O).
 - Log redaction keeps uvicorn's access-log arguments intact. Previously, redacting a request line broke the access formatter.
 - The script importer recognises cast names longer than four words, and `**Name** (note):` lines. Previously such lines were silently merged into the previous speaker's line.

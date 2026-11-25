@@ -10,6 +10,11 @@ const defaultPython = process.platform === 'win32'
   : path.join(repo, 'venv', 'bin', 'python');
 const python = process.env.GLADTALKER_PYTHON ? path.resolve(process.env.GLADTALKER_PYTHON) : defaultPython;
 const port = Number(process.env.GLADTALKER_E2E_PORT || 7863);
+// A second engine that requires a token, for the documented http://…/#token=… launch.
+const tokenPort = port + 1;
+export const E2E_TOKEN = 'e2e-token-123';
+const engineCommand = (p, workspace, extra = '') =>
+  `"${python}" studio_server.py --port ${p} --workspace "${path.join(repo, 'results', workspace)}" --log-level warning${extra}`;
 
 export default defineConfig({
   testDir: 'e2e',
@@ -23,11 +28,20 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
-  webServer: {
-    command: `"${python}" studio_server.py --port ${port} --workspace "${path.join(repo, 'results', 'studio-e2e')}" --log-level warning`,
-    cwd: repo,
-    url: `http://127.0.0.1:${port}/health`,
-    reuseExistingServer: true,
-    timeout: 120_000,
-  },
+  webServer: [
+    {
+      command: engineCommand(port, 'studio-e2e'),
+      cwd: repo,
+      url: `http://127.0.0.1:${port}/health`,
+      reuseExistingServer: true,
+      timeout: 120_000,
+    },
+    {
+      command: engineCommand(tokenPort, 'studio-e2e', ` --token ${E2E_TOKEN}`),
+      cwd: repo,
+      url: `http://127.0.0.1:${tokenPort}/health`,
+      reuseExistingServer: true,
+      timeout: 120_000,
+    },
+  ],
 });

@@ -27,7 +27,7 @@ The engine reads image paths, writes files, and starts downloads on your machine
 - **Network:** the server binds to **127.0.0.1** by default. It refuses to start on any other address unless `--token` is set, and then you must name the address clients will use with `--allow-host`.
 - **Host header:** unexpected `Host` headers are rejected (DNS-rebinding protection).
 - **Origin:** browser requests from any origin other than the Tauri shell (`tauri://localhost`, `http(s)://tauri.localhost`) or the same origin are rejected with `403` before anything runs. CORS alone isn't enough, because it only hides the response while the side effect would still happen. Use `--allow-origin` to add origins.
-- **Token:** with `--token` (or `GLADTALKER_STUDIO_TOKEN`), every route except `/health` needs `Authorization: Bearer <token>` or `X-GladTalker-Token: <token>`.
+- **Token:** with `--token` (or `GLADTALKER_STUDIO_TOKEN`), every route except `/health` needs `Authorization: Bearer <token>` or `X-GladTalker-Token: <token>`. The one exception is the bundled UI's own files (`/`, `/index.html`, and the files in `studio-ui/dist/`), which load with `GET`/`HEAD` and no token. A browser can't add a header to a page load, and the page has to load before it can read its `#token=` fragment. Those files are the same for every install and hold no user data. Uploads, job media, `/docs`, and every API route still need the token, and the Origin check still applies.
 - **WebSockets:** browsers can't send headers on WebSockets, and URLs end up in logs, so the token is never put in a WebSocket URL. Instead, get a single-use, 60-second ticket for one job from `POST /jobs/{id}/ws-ticket` and connect to the `url` it returns (`/ws/jobs/{id}?ticket=…`). Without a token, no ticket is needed. `token=` and `ticket=` values are redacted from server logs.
 - **Body size:** uploads are cut off at `max_upload_mb` (50 MB) as they stream in, and JSON bodies at 2 MB. Oversized requests get `413` without being spooled to disk.
 
@@ -117,6 +117,7 @@ Every WebSocket message has this shape:
 - `eta_s` is measured from the actual render speed so far.
 - Events are limited to about 4 per second, so a UI can forward `message` to an `aria-live="polite"` region without flooding screen readers.
 - Renders run one at a time on a single GPU lane. Model downloads and audio previews each have their own lane, so neither waits behind a render. Only one download job can exist at a time.
+- Audio previews are kept on disk only while they can still be fetched. Each new preview deletes preview folders whose job the engine no longer knows (dropped from its history, or from an earlier run), and keeps the 5 newest finished ones. Queued and running previews are never touched. Renders are never deleted.
 
 ## Walkthrough (Python)
 

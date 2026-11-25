@@ -1,7 +1,7 @@
 <script>
-  import { onMount } from 'svelte';
-  import { api } from '../lib/api.js';
-  import { project, renderRequest } from '../lib/project.svelte.js';
+  import { onDestroy, onMount } from 'svelte';
+  import { api, basename, revokeMedia } from '../lib/api.js';
+  import { project, renderRequest, projectGuard } from '../lib/project.svelte.js';
   import { engine, goTo, STEPS } from '../lib/app-state.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import { renderProblems } from '../lib/validate.js';
@@ -25,6 +25,8 @@
   let video = $state();
   let starting = $state(false);
   let startError = $state('');
+  let watch = null; // the one watcher for the current render; closed when the step closes
+  let destroyed = false;
 
   const problems = $derived(renderProblems(project, { models: engine.models, ffmpeg: engine.hardware?.ffmpeg?.available ?? null }));
   const running = $derived(job && (job.state === 'queued' || job.state === 'running'));
@@ -43,15 +45,43 @@
       : `The scene is enlarged to ${layout.scaledW}×${layout.scaledH} and cropped to fill the ${layout.width}×${layout.height} frame; edges are cut off.`;
   });
 
+  // With an engine token, media are blob: URLs; release the old ones whenever they're replaced.
+  function setMedia(video = '', vtt = '', srt = '') {
+    for (const old of [videoUrl, vttUrl, srtUrl]) if (![video, vtt, srt].includes(old)) revokeMedia(old);
+    videoUrl = video;
+    vttUrl = vtt;
+    srtUrl = srt;
+  }
+
+  onDestroy(() => {
+    destroyed = true;
+    watch?.close();
+    setMedia();
+  });
+
   async function showResult(final) {
-    videoUrl = await api.fileUrl(final.id, 'video');
-    vttUrl = final.result.vtt_path ? await api.fileUrl(final.id, 'vtt') : '';
-    srtUrl = final.result.srt_path ? await api.fileUrl(final.id, 'srt') : '';
+    const urls = [await api.fileUrl(final.id, 'video'),
+      final.result.vtt_path ? await api.fileUrl(final.id, 'vtt') : '',
+      final.result.srt_path ? await api.fileUrl(final.id, 'srt') : ''];
+    if (destroyed) return urls.forEach(revokeMedia);
+    setMedia(...urls);
     announce(`Your video is ready: ${duration(final.result.duration_s)}, ${final.result.width}×${final.result.height}. The player and download links are below.`);
   }
 
   async function follow(id) {
-    const final = await api.watchJob(id, (j) => (job = j)).done;
+    watch?.close();
+    watch = api.watchJob(id, (j) => (job = j));
+    let final;
+    try {
+      final = await watch.done;
+    } catch (err) {
+      // The engine no longer knows this job (it restarted, or dropped it from its history).
+      if (destroyed) return;
+      job = null;
+      if (project.lastRenderJobId === id) project.lastRenderJobId = null;
+      announceError(`Lost track of the render: ${err.message} Check the results folder, or render again.`);
+      return;
+    }
     if (final?.state === 'succeeded') await showResult(final);
     else if (final?.state === 'failed') announceError(`Render failed: ${final.error || final.message}`);
     else if (final?.state === 'cancelled') announce('Render cancelled.');
@@ -59,11 +89,12 @@
 
   async function render() {
     startError = '';
-    videoUrl = '';
-    vttUrl = '';
+    setMedia();
     starting = true;
+    const current = projectGuard();
     try {
       job = await api.startRender(renderRequest(project));
+      if (!current() || destroyed) return;
       project.lastRenderJobId = job.id;
       announce('Render started. Progress updates will be announced; you can keep working or cancel.');
       starting = false;
@@ -87,13 +118,17 @@
 
   // Re-attach to the last render after a reload (it keeps running in the engine).
   onMount(async () => {
-    if (!project.lastRenderJobId) return;
+    const id = project.lastRenderJobId;
+    if (!id) return;
+    const current = projectGuard();
     try {
-      job = await api.job(project.lastRenderJobId);
+      const snapshot = await api.job(id);
+      if (!current() || destroyed) return;
+      job = snapshot;
       if (job.state === 'succeeded') await showResult(job);
       else if (job.state === 'queued' || job.state === 'running') follow(job.id);
     } catch {
-      project.lastRenderJobId = null; // the engine restarted; that job is gone
+      if (current() && project.lastRenderJobId === id) project.lastRenderJobId = null; // the engine restarted; that job is gone
     }
   });
 
@@ -204,9 +239,10 @@
           </div>
         </div>
         <ul class="downloads">
-          <li><a href={videoUrl} download>Download video (MP4)</a></li>
-          {#if srtUrl}<li><a href={srtUrl} download>Download captions (SRT)</a></li>{/if}
-          {#if result.vtt_path}<li><a href={vttUrl} download>Download captions (WebVTT)</a></li>{/if}
+          <!-- Explicit names: blob: URLs (token mode) carry no filename of their own. -->
+          <li><a href={videoUrl} download={basename(result.video_path)}>Download video (MP4)</a></li>
+          {#if srtUrl}<li><a href={srtUrl} download={basename(result.srt_path)}>Download captions (SRT)</a></li>{/if}
+          {#if vttUrl}<li><a href={vttUrl} download={basename(result.vtt_path)}>Download captions (WebVTT)</a></li>{/if}
         </ul>
         <p class="muted">Saved on this computer in <code>{result.output_dir}</code></p>
         {#if result.captions?.length}

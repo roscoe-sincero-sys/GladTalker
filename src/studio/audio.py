@@ -213,6 +213,20 @@ class DialogueAudio:
     speaker_wavs: dict[str, str]
 
 
+def _load_wav(path: str):
+    """``AudioSegment.from_wav`` on a handle we close (pydub leaves paths open, which on Windows
+    can stop the work folder from being deleted)."""
+    from pydub import AudioSegment
+
+    with open(path, "rb") as f:
+        return AudioSegment.from_wav(f)
+
+
+def _save_wav(segment, path: str) -> None:
+    with open(path, "wb") as f:  # pydub's export(path) returns the file still open
+        segment.export(f, format="wav")
+
+
 def build_dialogue_audio(
     lines: Sequence[tuple[str, str]],
     semitones: dict[str, float],
@@ -234,7 +248,7 @@ def build_dialogue_audio(
     raw: list[tuple[str, str, str, int]] = []
     for i, (speaker, text) in enumerate(lines):
         path = tts.synthesize(text, os.path.join(work_dir, f"raw_{i:03d}.wav"))
-        raw.append((speaker, text, path, len(AudioSegment.from_wav(path))))
+        raw.append((speaker, text, path, len(_load_wav(path))))
         if on_line:
             on_line(i + 1, n)
 
@@ -244,7 +258,7 @@ def build_dialogue_audio(
     for i, (speaker, text, path, _) in enumerate(raw):
         out = os.path.join(work_dir, f"line_{i:03d}.wav")
         shift_audio(path, out, semitones.get(speaker, 0.0), tempo, ffmpeg=ffmpeg)
-        seg = AudioSegment.from_wav(out).set_frame_rate(SAMPLE_RATE).set_channels(1)
+        seg = _load_wav(out).set_frame_rate(SAMPLE_RATE).set_channels(1)
         processed.append((speaker, text, seg))
 
     plan = plan_dialogue([(s, t, len(seg)) for s, t, seg in processed], target_ms, gap_ms)
@@ -263,10 +277,10 @@ def build_dialogue_audio(
         tracks[span.speaker] = tracks.get(span.speaker, AudioSegment.empty()) + turn
 
     master_wav = os.path.join(work_dir, "master.wav")
-    master[: plan.total_ms].export(master_wav, format="wav")
+    _save_wav(master[: plan.total_ms], master_wav)
     speaker_wavs = {}
     for idx, (speaker, track) in enumerate(tracks.items()):
         path = os.path.join(work_dir, f"speaker_{idx:02d}.wav")
-        track.export(path, format="wav")
+        _save_wav(track, path)
         speaker_wavs[speaker] = path
     return DialogueAudio(plan=plan, tempo=tempo, master_wav=master_wav, speaker_wavs=speaker_wavs)

@@ -47,9 +47,16 @@ npm run e2e      # Playwright: starts an engine and drives the built dist/ in Ch
 ```
 
 - **Setup:** `npm run e2e` needs a one-time `npx playwright install chromium`. It uses `../venv` by default; set `GLADTALKER_PYTHON=../venv-dml/Scripts/python.exe` for the DirectML venv.
-- **What it covers:** axe-core WCAG 2.2 A/AA scans of every step (light and dark), keyboard editing, the real audio preview, autosave, the Help dialog, and 320 px reflow.
+- **What it covers:**
+  - axe-core WCAG 2.2 A/AA scans of every step (light and dark);
+  - keyboard editing, including focus after reordering at the top and bottom of the list;
+  - the real audio preview and autosave;
+  - a slow import racing an Open project;
+  - the `#token=` launch against a second engine started with `--token`;
+  - the Help dialog and 320 px reflow.
 - **Real render:** set `GLADTALKER_E2E_RENDER=1` to also render a short video (a few minutes).
-- **Engine token:** if the engine runs with `--token`, open the UI as `http://127.0.0.1:7860/#token=…`. The token moves into session storage and is removed from the address bar.
+- **Engine token:** if the engine runs with `--token`, open the UI as `http://127.0.0.1:7860/#token=…`. The page itself loads without the token. The token then moves into session storage, is removed from the address bar, and is sent with every request. Images and media are fetched with it and shown through `blob:` URLs.
+- **Dev server and the Origin check:** `npm run dev` forwards requests to the engine unchanged, Origin and Host included. A page on `http://localhost:5173` is therefore same-origin to the engine, while any other site's requests through the proxy are still refused with 403. No `--allow-origin` is needed.
 
 ## Layout
 

@@ -1,9 +1,13 @@
 <script>
-  import { tick } from 'svelte';
-  import { api } from '../lib/api.js';
-  import { project, newId, nextStyleIndex, audioPreviewRequest } from '../lib/project.svelte.js';
+  import { onDestroy, tick } from 'svelte';
+  import { api, revokeMedia } from '../lib/api.js';
+  import { project, newId, nextStyleIndex, audioPreviewRequest, projectGuard,
+    MAX_CAST, MAX_LINES, MAX_LINE_CHARS } from '../lib/project.svelte.js';
+  import { goTo } from '../lib/app-state.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import { linesFromParse, moveLine, nameKey } from '../lib/script-lines.js';
+  import { audioProblems } from '../lib/validate.js';
+  import { playBlob } from '../lib/player.js';
   import { defaultRegion } from '../lib/regions.js';
   import { pacingLabel, timestamp, duration } from '../lib/format.js';
   import DialogueRow from '../components/DialogueRow.svelte';
@@ -19,23 +23,40 @@
   let previewJob = $state(null);
   let previewUrl = $state('');
   let previewKey = $state('');
+  let previewWatch = null;
+  let destroyed = false;
 
   const castNames = $derived(project.cast.map((m) => m.name.trim()).filter(Boolean));
   const currentKey = $derived(JSON.stringify(audioPreviewRequest(project)));
   const previewStale = $derived(previewKey && previewKey !== currentKey);
   const previewResult = $derived(previewJob?.state === 'succeeded' ? previewJob.result : null);
-  const canPreview = $derived(project.cast.length > 0 && project.script.length > 0
-    && project.script.every((l) => l.castId && l.text.trim()));
+  const previewBlockers = $derived(audioProblems(project));
+  const castFull = $derived(project.cast.length >= MAX_CAST);
 
-  // Re-check pronunciation shortly after typing stops.
+  function setPreviewUrl(url) {
+    revokeMedia(previewUrl);
+    previewUrl = url;
+  }
+
+  onDestroy(() => {
+    destroyed = true;
+    previewWatch?.close();
+    revokeMedia(previewUrl);
+  });
+
+  // Re-check pronunciation shortly after typing stops. Each check gets a number; an answer that
+  // arrives after a newer check was sent is dropped, so stale suggestions never come back.
   let lintTimer;
+  let lintSeq = 0;
   $effect(() => {
-    const lines = project.script.map((l) => ({ id: l.id, text: l.text }));
+    const lines = project.script.map((l) => ({ id: l.id, text: l.text.slice(0, MAX_LINE_CHARS) }));
     clearTimeout(lintTimer);
     lintTimer = setTimeout(async () => {
+      const seq = ++lintSeq;
       if (!lines.length) return (warnings = {});
       try {
-        const res = await api.lintLines(lines.map((l) => l.text));
+        const res = await api.lintLines(lines.slice(0, MAX_LINES).map((l) => l.text));
+        if (seq !== lintSeq || destroyed) return;
         warnings = Object.fromEntries(lines.map((l, i) => [l.id, res.lines[i] ?? []]));
       } catch {
         /* lint is advisory: ignore failures */
@@ -52,9 +73,18 @@
       return;
     }
     importing = true;
+    const current = projectGuard();
     try {
       const parsed = await api.parseScript(pasted, castNames);
+      if (!current()) return; // a different project was opened meanwhile: don't touch it
       const { lines, unknownSpeakers: unknown, warningCount } = linesFromParse(parsed, project.cast);
+      const kept = mode === 'replace' ? 0 : project.script.length;
+      if (kept + lines.length > MAX_LINES) {
+        importMessage = `That would make ${kept + lines.length} lines, but a script can have up to ${MAX_LINES}. `
+          + 'Import a shorter script, or delete some lines first.';
+        announceError(importMessage);
+        return;
+      }
       project.script = mode === 'replace' ? lines : [...project.script, ...lines];
       unknownSpeakers = unknown;
       importMessage = `Imported ${lines.length} line${lines.length === 1 ? '' : 's'}`
@@ -62,6 +92,7 @@
         + (unknown.length ? ` Not in the cast: ${unknown.join(', ')}.` : '');
       announce(importMessage);
     } catch (err) {
+      if (!current()) return;
       importMessage = err.message;
       announceError(err.message);
     } finally {
@@ -70,6 +101,7 @@
   }
 
   function addToCast(name) {
+    if (castFull) return;
     const img = project.image;
     const region = img ? defaultRegion(img.width, img.height) : { x: 0, y: 0, w: 64, h: 64 };
     const member = { id: newId('c'), name, region, voice: 'neutral', semitones: 0, style: nextStyleIndex(project.cast) };
@@ -87,13 +119,19 @@
     announce(`Added ${name} to the cast and gave them ${linked} line${linked === 1 ? '' : 's'}. Set their region in the Cast step.`);
   }
 
+  // After a move, keep focus where the keyboard user was. A move button that is now disabled
+  // (the line reached the top or bottom) hands focus to the line's other move button.
   async function onmove(index, delta) {
     const next = moveLine(project.script, index, delta);
     if (!next) return;
     const focusedId = document.activeElement?.id;
+    const lineId = project.script[index].id;
     project.script = next;
     await tick();
-    if (focusedId) document.getElementById(focusedId)?.focus();
+    const target = [focusedId, delta < 0 ? `down-${lineId}` : `up-${lineId}`, `text-${lineId}`]
+      .map((id) => id && document.getElementById(id))
+      .find((el) => el && !el.disabled);
+    target?.focus();
     announce(`Line ${index + 1} moved to position ${index + delta + 1}.`);
   }
 
@@ -106,6 +144,10 @@
   }
 
   async function addLine() {
+    if (project.script.length >= MAX_LINES) {
+      announceError(`A script can have up to ${MAX_LINES} lines.`);
+      return;
+    }
     const last = project.script.at(-1);
     const line = { id: newId('l'), castId: last?.castId ?? project.cast[0]?.id ?? null, text: '' };
     project.script.push(line);
@@ -118,13 +160,11 @@
     if (!member) return;
     playingId = line.id;
     try {
-      const url = URL.createObjectURL(await api.previewVoice(line.text, member.semitones));
-      const audio = new Audio(url);
-      audio.onended = () => { URL.revokeObjectURL(url); playingId = null; };
+      const blob = await api.previewVoice(line.text, member.semitones);
       announce(`Playing ${member.name}: ${line.text}`);
-      await audio.play();
+      await playBlob(blob, () => { if (playingId === line.id) playingId = null; });
     } catch (err) {
-      playingId = null;
+      if (playingId === line.id) playingId = null;
       announceError(err.message);
     }
   }
@@ -135,21 +175,28 @@
   }
 
   async function previewMix() {
-    previewUrl = '';
+    setPreviewUrl('');
+    previewWatch?.close();
     const body = audioPreviewRequest(project);
     previewKey = JSON.stringify(body);
+    const current = projectGuard();
     try {
       previewJob = await api.previewAudio(body);
+      if (!current() || destroyed) return;
       project.lastPreviewJobId = previewJob.id;
       announce('Building the full audio mix…');
-      const final = await api.watchJob(previewJob.id, (j) => (previewJob = j)).done;
+      previewWatch = api.watchJob(previewJob.id, (j) => (previewJob = j));
+      const final = await previewWatch.done;
       if (final?.state === 'succeeded') {
-        previewUrl = await api.fileUrl(final.id, 'audio');
+        const url = await api.fileUrl(final.id, 'audio');
+        if (destroyed) return revokeMedia(url);
+        setPreviewUrl(url);
         announce(`Audio mix ready: ${duration(final.result.duration_s)} at ${pacingLabel(final.result.tempo)}. Use the player to listen.`);
       } else if (final?.state === 'failed') {
         announceError(final.error || 'The audio preview failed.');
       }
     } catch (err) {
+      if (destroyed) return;
       previewKey = '';
       announceError(err.message);
       previewJob = { state: 'failed', error: err.message, message: err.message, progress: 0, stages: [] };
@@ -181,9 +228,13 @@
     {#if unknownSpeakers.length}
       <div class="row">
         {#each unknownSpeakers as name (name)}
-          <button type="button" onclick={() => addToCast(name)}>Add “{name}” to the cast</button>
+          <button type="button" onclick={() => addToCast(name)} disabled={castFull}
+            aria-describedby={castFull ? 'cast-full-hint' : undefined}>Add “{name}” to the cast</button>
         {/each}
       </div>
+      {#if castFull}
+        <p class="hint" id="cast-full-hint">The cast is full ({MAX_CAST} members). Remove someone in the Cast step to add another, or give these lines to an existing speaker.</p>
+      {/if}
     {/if}
   </section>
 
@@ -223,11 +274,24 @@
       {/if}
 
       <div class="preview">
-        <button type="button" onclick={previewMix} disabled={!canPreview || previewJob?.state === 'running' || previewJob?.state === 'queued'}
+        <button type="button" onclick={previewMix} disabled={previewBlockers.length > 0 || previewJob?.state === 'running' || previewJob?.state === 'queued'}
           aria-describedby="preview-mix-hint">▶ Preview full audio mix</button>
-        <p class="hint muted" id="preview-mix-hint">
-          {canPreview ? 'Hear every line with its voice and pacing, before rendering any video.' : 'Every line needs a speaker and text first.'}
-        </p>
+        {#if previewBlockers.length}
+          <div class="hint" id="preview-mix-hint">
+            <p>To preview the mix, first:</p>
+            <ul class="blockers">
+              {#each previewBlockers.slice(0, 3) as b, i (i)}
+                <li>
+                  <span>{b.message}</span>
+                  <button type="button" onclick={() => goTo(b.step, b.fieldId)}>Fix<span class="visually-hidden">: {b.message}</span></button>
+                </li>
+              {/each}
+            </ul>
+            {#if previewBlockers.length > 3}<p class="muted">…and {previewBlockers.length - 3} more (see the Roll checklist).</p>{/if}
+          </div>
+        {:else}
+          <p class="hint muted" id="preview-mix-hint">Hear every line with its voice and pacing, before rendering any video.</p>
+        {/if}
         <JobProgress job={previewJob?.state === 'succeeded' ? null : previewJob} id="preview-job" label="Audio mix" />
         {#if previewResult}
           {#if previewStale}<p class="error-text">The script or voices changed since this preview. Preview again to hear the changes.</p>{/if}
@@ -272,6 +336,8 @@
   .preview > :global(*) { max-width: 100%; }
   .preview audio, .preview details, .preview .field { justify-self: stretch; }
   .import-msg { margin-top: 0.75rem; font-weight: 600; }
+  .blockers { margin: 0.25rem 0 0; padding-left: 1.25rem; display: grid; gap: 0.35rem; }
+  .blockers li { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: center; }
   audio { width: 100%; }
   .timeline { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
   .timeline th, .timeline td { text-align: left; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }

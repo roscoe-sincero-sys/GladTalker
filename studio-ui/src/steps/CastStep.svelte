@@ -1,6 +1,6 @@
 <script>
-  import { api } from '../lib/api.js';
-  import { project, newId, nextStyleIndex } from '../lib/project.svelte.js';
+  import { api, revokeMedia } from '../lib/api.js';
+  import { project, newId, nextStyleIndex, projectGuard, MAX_CAST } from '../lib/project.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import { clampRegion, defaultRegion, overlap } from '../lib/regions.js';
   import Stage from '../components/Stage.svelte';
@@ -14,7 +14,10 @@
   let dragOver = $state(false);
   let selectedId = $state(project.cast[0]?.id ?? null);
 
-  // Show the saved scene again after a reload.
+  const castFull = $derived(project.cast.length >= MAX_CAST);
+
+  // Show the scene (also after a reload). With an engine token the image is a blob: URL, which
+  // is released when the scene changes or the step closes.
   $effect(() => {
     const path = project.image?.path;
     if (!path) {
@@ -22,9 +25,17 @@
       return;
     }
     let cancelled = false;
-    api.uploadedImageUrl(path).then((url) => { if (!cancelled) imageUrl = url; })
+    let url = '';
+    api.uploadedImageUrl(path)
+      .then((u) => {
+        if (cancelled) revokeMedia(u);
+        else imageUrl = url = u;
+      })
       .catch(() => { if (!cancelled) fileError = 'The saved scene image is no longer available. Choose it again.'; });
-    return () => (cancelled = true);
+    return () => {
+      cancelled = true;
+      revokeMedia(url);
+    };
   });
 
   const nameErrors = $derived.by(() => {
@@ -47,14 +58,17 @@
       return;
     }
     uploading = true;
+    const current = projectGuard();
     try {
       const res = await api.upload(file);
+      if (!current()) return; // a different project was opened meanwhile: don't touch it
       const hadCast = project.cast.length > 0;
       project.image = { path: res.image_path, name: file.name, width: res.width, height: res.height };
       project.detections = [];
       for (const m of project.cast) m.region = clampRegion(m.region, res.width, res.height);
       announce(`Scene loaded: ${file.name}, ${res.width} by ${res.height} pixels.${hadCast ? ' Check that each region still covers its character.' : ' Next, choose Auto-Detect Cast.'}`);
     } catch (err) {
+      if (!current()) return;
       fileError = err.message;
       announceError(err.message);
     } finally {
@@ -64,20 +78,31 @@
 
   async function autoCast() {
     detecting = true;
+    const current = projectGuard();
+    const imagePath = project.image.path;
     try {
-      const res = await api.detectCast(project.image.path, Number(sensitivity));
+      const res = await api.detectCast(imagePath, Number(sensitivity));
+      // Drop the answer if another project was opened or the scene was replaced meanwhile.
+      if (!current() || project.image?.path !== imagePath) return;
       project.detections = res.cast;
       let added = 0;
+      let skipped = 0;
       for (const s of res.cast) {
         if (project.cast.some((m) => overlap(m.region, s.region) > 0.3)) continue;
+        if (project.cast.length >= MAX_CAST) {
+          skipped++;
+          continue;
+        }
         const member = { id: newId('c'), name: `Character ${project.cast.length + 1}`, region: { ...s.region },
           voice: 'neutral', semitones: 0, style: nextStyleIndex(project.cast) };
         project.cast.push(member);
         added++;
       }
       selectedId ??= project.cast[0]?.id ?? null;
-      announce(`${res.message} ${added ? `Added ${added} cast member${added === 1 ? '' : 's'}. Name each one in the list.` : 'No new cast members (they are already cast).'}`);
+      announce(`${res.message} ${added ? `Added ${added} cast member${added === 1 ? '' : 's'}. Name each one in the list.` : skipped ? '' : 'No new cast members (they are already cast).'}`
+        + (skipped ? ` ${skipped} more face${skipped === 1 ? ' was' : 's were'} not added: a video can have up to ${MAX_CAST} cast members.` : ''));
     } catch (err) {
+      if (!current()) return;
       announceError(err.message);
       fileError = err.message;
     } finally {
@@ -86,6 +111,7 @@
   }
 
   function addRegion() {
+    if (castFull) return;
     const member = { id: newId('c'), name: `Character ${project.cast.length + 1}`,
       region: defaultRegion(project.image.width, project.image.height), voice: 'neutral', semitones: 0,
       style: nextStyleIndex(project.cast) };
@@ -153,8 +179,12 @@
           <button type="button" id="auto-cast" class="primary" onclick={autoCast} disabled={detecting}>
             <span aria-hidden="true">✨</span> {detecting ? 'Detecting…' : 'Auto-Detect Cast'}
           </button>
-          <button type="button" onclick={addRegion}>+ Add region</button>
+          <button type="button" onclick={addRegion} disabled={castFull}
+            aria-describedby={castFull ? 'cast-full' : undefined}>+ Add region</button>
         </div>
+        {#if castFull}
+          <p class="hint" id="cast-full">The cast is full: a video can have up to {MAX_CAST} cast members. Remove one to add another.</p>
+        {/if}
       {:else}
         <span id="auto-cast" tabindex="-1"></span>
       {/if}

@@ -37,16 +37,16 @@
     </div>
     <div class="field text">
       <label for="text-{line.id}" class="visually-hidden">What is said in line {n}</label>
-      <input id="text-{line.id}" type="text" bind:value={line.text} autocomplete="off" spellcheck="true"
+      <input id="text-{line.id}" type="text" bind:value={line.text} autocomplete="off" spellcheck="true" maxlength="1000"
         aria-invalid={textError ? 'true' : undefined}
         aria-describedby={[textError && `text-error-${line.id}`, warnings.length && `warn-${line.id}`].filter(Boolean).join(' ') || undefined} />
     </div>
     <div class="buttons" role="group" aria-label="Line {n} actions">
       <button type="button" onclick={() => onplay(line)} disabled={!speaker || !line.text.trim() || playing}
         aria-label="Play line {n}">▶ <span class="word">{playing ? '…' : 'Play'}</span></button>
-      <button type="button" onclick={() => onmove(index, -1)} disabled={index === 0} aria-label="Move line {n} up"
+      <button type="button" id="up-{line.id}" onclick={() => onmove(index, -1)} disabled={index === 0} aria-label="Move line {n} up"
         aria-keyshortcuts="Alt+ArrowUp">↑ <span class="word">Up</span></button>
-      <button type="button" onclick={() => onmove(index, 1)} disabled={index === total - 1} aria-label="Move line {n} down"
+      <button type="button" id="down-{line.id}" onclick={() => onmove(index, 1)} disabled={index === total - 1} aria-label="Move line {n} down"
         aria-keyshortcuts="Alt+ArrowDown">↓ <span class="word">Down</span></button>
       <button type="button" class="danger" onclick={() => ondelete(index)} aria-label="Delete line {n}">✕ <span class="word">Delete</span></button>
     </div>

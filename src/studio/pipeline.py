@@ -350,6 +350,8 @@ def render(ctx: JobContext, req: RenderRequest, out_dir: Path, tts: TTSService, 
             )
         except DialogueTooLongError as exc:
             raise UserFacingError(str(exc)) from exc
+        except ImportError as exc:
+            raise UserFacingError(tts_missing_message(exc)) from exc
         plan = audio.plan
         timings["audio_s"] = round(time.perf_counter() - t0, 2)
         frame_summary = " + ".join(f"{plan.speaker_frames.get(n, 0)} {n} frames" for n in speakers_in_script)
@@ -490,6 +492,11 @@ def require_ffmpeg_user_facing() -> str:
         raise UserFacingError(str(exc)) from exc
 
 
+def tts_missing_message(exc: ImportError) -> str:
+    return (f"Text-to-speech isn't installed ({exc}). Install the requirements "
+            "(pip install -r requirements.txt, which includes coqui-tts) and restart GladTalker Studio.")
+
+
 def preview_audio(ctx: JobContext, req, out_dir: Path, tts: TTSService) -> dict:
     """Job body for ``POST /audio/preview``: build the exact soundtrack a render would use (same
     voices, tempo, and timeline) so it can be heard, and its pacing checked, before any video
@@ -516,6 +523,8 @@ def preview_audio(ctx: JobContext, req, out_dir: Path, tts: TTSService) -> dict:
         shutil.move(audio.master_wav, audio_path)
     except DialogueTooLongError as exc:
         raise UserFacingError(str(exc)) from exc
+    except ImportError as exc:
+        raise UserFacingError(tts_missing_message(exc)) from exc
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 

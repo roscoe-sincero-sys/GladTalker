@@ -1,6 +1,7 @@
 <script>
   // First-run checks: FFmpeg and the pretrained models, with a one-click download and live
   // progress. Shown whenever something is missing, before any terminal command would be needed.
+  import { onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
   import { engine, refreshModels } from '../lib/app-state.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
@@ -8,6 +9,8 @@
 
   let job = $state(null);
   let error = $state('');
+  let watch = null;
+  onDestroy(() => watch?.close());
 
   const ffmpeg = $derived(engine.hardware?.ffmpeg);
   const models = $derived(engine.models);
@@ -18,7 +21,10 @@
     try {
       job = await api.downloadModels(false);
       announce('Downloading models. This can take a while; progress is shown below.');
-      const final = await api.watchJob(job.id, (j) => (job = j)).done;
+      watch?.close();
+      watch = api.watchJob(job.id, (j) => (job = j));
+      const final = await watch.done;
+      if (final === null) return; // closed: the panel went away
       await refreshModels();
       if (final?.state === 'succeeded') announce('All models are downloaded and verified.');
       else if (final?.state === 'failed') announceError(final.error || 'The download failed.');

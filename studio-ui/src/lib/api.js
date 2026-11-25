@@ -2,6 +2,10 @@
 
 const TOKEN_KEY = 'gladtalker.token';
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
+// Answers that won't change by asking again: the token is wrong, or the job is gone (the engine
+// restarted or dropped it from its history).
+const PERMANENT = new Set([401, 403, 404]);
+const MAX_POLL_MS = 10_000;
 
 export class ApiError extends Error {
   constructor(status, detail) {
@@ -86,19 +90,37 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
   }
 
   /** Follow a job until it finishes: WebSocket (with a single-use ticket) first, polling as a
-   * fallback. Calls onEvent(snapshot) for every update; resolves with the final snapshot. */
+   * fallback. Calls onEvent(snapshot) for every update.
+   *
+   * `done` resolves with the final snapshot, or with null after `close()`. It rejects with an
+   * ApiError when the job can't be followed any more (401/403/404: wrong token, or the engine
+   * restarted and the job is gone). Other failures retry with growing pauses (up to 10 s).
+   * Call `close()` when the caller goes away, so nothing keeps polling in the background. */
   function watchJob(jobId, onEvent, { pollMs = 1000 } = {}) {
     let closed = false;
     let socket = null;
     let timer = null;
+    let delay = pollMs;
     let resolveDone;
-    const done = new Promise((r) => (resolveDone = r));
-    const finish = (job) => {
-      if (closed) return;
+    let rejectDone;
+    const done = new Promise((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+    const stop = () => {
       closed = true;
       clearTimeout(timer);
       if (socket && socket.readyState <= 1) socket.close();
+    };
+    const finish = (job) => {
+      if (closed) return;
+      stop();
       resolveDone(job);
+    };
+    const fail = (err) => {
+      if (closed) return;
+      stop();
+      rejectDone(err);
     };
     const deliver = (job) => {
       if (closed) return;
@@ -109,16 +131,19 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
       if (closed) return;
       try {
         deliver(await request('GET', `/jobs/${jobId}`));
-      } catch {
-        /* transient: keep polling */
+        delay = pollMs;
+      } catch (err) {
+        if (PERMANENT.has(err.status)) return fail(err);
+        delay = Math.min(delay * 2, MAX_POLL_MS); // engine busy or restarting: back off
       }
-      if (!closed) timer = setTimeout(poll, pollMs);
+      if (!closed) timer = setTimeout(poll, delay);
     };
     (async () => {
       if (!WebSocketImpl) return poll();
       let gotEvent = false;
       try {
         const { url } = await request('POST', `/jobs/${jobId}/ws-ticket`);
+        if (closed) return; // closed while the ticket was on its way
         socket = new WebSocketImpl(wsUrl(url));
         socket.onmessage = (msg) => {
           gotEvent = true;
@@ -134,8 +159,9 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
         socket.onerror = () => {
           if (!gotEvent && !closed && socket.readyState !== 1) socket.close();
         };
-      } catch {
-        poll();
+      } catch (err) {
+        if (PERMANENT.has(err.status)) fail(err);
+        else poll();
       }
     })();
     return { done, close: () => finish(null) };
@@ -168,6 +194,11 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
     plainFileUrl: (id, kind) => `${base}/jobs/${id}/files/${kind}`,
     watchJob,
   };
+}
+
+/** Release a URL made by mediaUrl() (a no-op for plain URLs). */
+export function revokeMedia(url) {
+  if (typeof url === 'string' && url.startsWith('blob:')) URL.revokeObjectURL(url);
 }
 
 export function basename(path) {

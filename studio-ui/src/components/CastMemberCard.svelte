@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { playBlob } from '../lib/player.js';
   import { engine } from '../lib/app-state.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import { clampRegion, regionProblems, snapToFace, expandToTile } from '../lib/regions.js';
@@ -50,11 +51,8 @@
     previewing = true;
     try {
       const blob = await api.previewVoice(`Hello, I'm ${member.name.trim() || 'a new character'}.`, member.semitones);
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audio.onended = () => URL.revokeObjectURL(url);
       announce(`Playing ${label}'s voice.`);
-      await audio.play();
+      await playBlob(blob);
     } catch (err) {
       announceError(err.message);
     } finally {
@@ -71,7 +69,7 @@
 
   <div class="field">
     <label for="name-{id}">Name</label>
-    <input id="name-{id}" type="text" bind:value={member.name} autocomplete="off" required
+    <input id="name-{id}" type="text" bind:value={member.name} autocomplete="off" required maxlength="64"
       aria-invalid={nameError ? 'true' : undefined} aria-describedby={nameError ? `name-error-${id}` : undefined} />
     {#if nameError}<p class="error-text" id="name-error-{id}">{nameError}</p>{/if}
   </div>
