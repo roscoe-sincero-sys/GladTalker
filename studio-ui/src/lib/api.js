@@ -6,6 +6,22 @@ const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
 // restarted or dropped it from its history).
 const PERMANENT = new Set([401, 403, 404]);
 const MAX_POLL_MS = 10_000;
+// Job ids as the engine makes them (src/studio/jobs.py: 12 hex characters), and the kinds of
+// file a job can serve. Anything else (say, from an edited project file) never reaches a URL.
+export const JOB_ID_RE = /^[0-9a-f]{12}$/;
+const FILE_KINDS = new Set(['video', 'srt', 'vtt', 'audio']);
+
+export const isJobId = (id) => typeof id === 'string' && JOB_ID_RE.test(id);
+
+function jobPath(id, rest = '') {
+  if (!isJobId(id)) throw new ApiError(400, 'That isn’t a GladTalker job id.');
+  return `/jobs/${id}${rest}`;
+}
+
+function filePath(id, kind) {
+  if (!FILE_KINDS.has(kind)) throw new ApiError(400, `Unknown file kind “${kind}”.`);
+  return jobPath(id, `/files/${kind}`);
+}
 
 export class ApiError extends Error {
   constructor(status, detail) {
@@ -97,6 +113,9 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
    * restarted and the job is gone). Other failures retry with growing pauses (up to 10 s).
    * Call `close()` when the caller goes away, so nothing keeps polling in the background. */
   function watchJob(jobId, onEvent, { pollMs = 1000 } = {}) {
+    if (!isJobId(jobId)) {
+      return { done: Promise.reject(new ApiError(400, 'That isn’t a GladTalker job id.')), close() {} };
+    }
     let closed = false;
     let socket = null;
     let timer = null;
@@ -188,10 +207,10 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
       request('POST', '/tts/preview', { text, semitones, tempo }, { asBlob: true }),
     previewAudio: (body) => request('POST', '/audio/preview', body),
     startRender: (body) => request('POST', '/render/start', body),
-    job: (id) => request('GET', `/jobs/${id}`),
-    cancelJob: (id) => request('POST', `/jobs/${id}/cancel`),
-    fileUrl: (id, kind) => mediaUrl(`/jobs/${id}/files/${kind}`),
-    plainFileUrl: (id, kind) => `${base}/jobs/${id}/files/${kind}`,
+    job: async (id) => request('GET', jobPath(id)),
+    cancelJob: async (id) => request('POST', jobPath(id, '/cancel')),
+    fileUrl: async (id, kind) => mediaUrl(filePath(id, kind)),
+    plainFileUrl: (id, kind) => `${base}${filePath(id, kind)}`,
     watchJob,
   };
 }

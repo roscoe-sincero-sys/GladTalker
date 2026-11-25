@@ -28,7 +28,9 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 - Engine endpoints for the UI: `GET /uploads/{name}`, `POST /script/lint`, and `POST /audio/preview` (a job that builds the render's exact soundtrack; WAV via `/jobs/{id}/files/audio`). UI responses carry a strict Content-Security-Policy and `nosniff`.
 - UI robustness:
   - Async results (import, upload, detection, render start) are dropped if New/Open replaced the project meanwhile.
-  - Renders and audio previews are started at project scope. A job the engine accepts after you've left the step is still saved, and the step follows it when shown again. Its button stays disabled while a request is on its way.
+  - Renders and audio previews are started at project scope. A job the engine accepts after you've left the step is still saved, and the step follows it when shown again. Its button stays disabled while a request is on its way, and while a saved job's state is still being checked.
+  - Saved job references are trusted only if they look like engine job ids (12 hex characters), both when a project loads and in the API client, so an edited project file can't steer requests. The audio-preview staleness check saves only a digest, never an old copy of the dialogue.
+  - Lines over the 1000-character limit get no Auto-Fix (it would replace the whole line with a shortened one); they already ask to be split.
   - A preview's timing and audio are shown together, and only for the newest preview.
   - Auto-Fix suggestions belong to the exact text they were made for, and disappear as soon as the line changes.
   - A finished video is shown even if its captions fail to load, and the captions have their own retry.
@@ -37,15 +39,16 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - The engine's limits (8 cast members, 500 lines, 1000 characters a line) are checked in the UI, and the checklist and audio preview say where to fix them.
   - Reordering keeps keyboard focus at the ends of the list.
   - Downloads keep their file names in token mode.
-- Audio previews no longer pile up on disk. Each engine keeps its previews in its own locked folder: its previews whose job is gone are deleted, and its 5 newest finished ones are kept. Another engine's folder is reclaimed only after that engine has exited, so two engines can safely share one workspace.
+- Audio previews no longer pile up on disk. Each engine keeps its previews in its own locked folder: its previews whose job is gone are deleted, and its 5 newest finished ones are kept. Another engine's folder is reclaimed only after that engine has exited, so two engines can safely share one workspace (and two engines racing to reclaim the same folder both carry on).
 - UI tests:
-  - 62 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
+  - 66 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
   - Playwright end-to-end tests against a real engine:
     - axe WCAG 2.2 A/AA scans of every step in light and dark;
     - keyboard region editing, and line reordering with focus kept at the ends of the list;
     - a real audio-mix preview and autosave across reload;
     - a slow import racing an Open project;
-    - stale Auto-Fix suggestions, a render accepted after leaving Roll, and a duplicate preview submission;
+    - stale Auto-Fix suggestions, a render accepted after leaving Roll, a slow re-attach to a saved render, and a duplicate preview submission;
+    - forged job ids in an opened project (no job request is made), and no removed dialogue in a saved project file;
     - the `#token=` launch against a token-protected engine, and a caption download failure in token mode;
     - Help dialog focus and 320 px reflow;
     - an opt-in real render.
@@ -68,7 +71,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached per file, bound to the hashed file's own size, mtime, and file ID (read from the open handle and re-checked against the path), with a racy-timestamp guard.
   - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (146 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (147 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.

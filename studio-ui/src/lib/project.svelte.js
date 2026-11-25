@@ -2,6 +2,8 @@
 // auto-saved to localStorage so nothing is re-entered after a reload (WCAG 3.3.7), and can be
 // saved to / opened from a `.gladtalker.json` file.
 
+import { isJobId } from './api.js';
+
 export const STORAGE_KEY = 'gladtalker.project.v1';
 export const PROJECT_VERSION = 1;
 // The engine's request limits (src/studio/schemas.py), checked here so the UI never offers a
@@ -27,7 +29,7 @@ export function defaultProject() {
     captions: true,
     lastRenderJobId: null,
     lastPreviewJobId: null,
-    lastPreviewKey: null, // the audioPreviewRequest that preview was made from
+    lastPreviewKey: null, // previewDigest() of the request that preview was made from
   };
 }
 
@@ -52,7 +54,31 @@ export function normalizeProject(raw) {
     pendingSpeaker: l.pendingSpeaker ?? null,
   })) : [];
   out.detections = Array.isArray(raw.detections) ? raw.detections : [];
+  // References to engine jobs come back only if they look like ids the engine made; anything
+  // else is dropped (the cast and dialogue are kept), so a project file can't steer requests.
+  out.lastRenderJobId = isJobId(raw.lastRenderJobId) ? raw.lastRenderJobId : null;
+  out.lastPreviewJobId = isJobId(raw.lastPreviewJobId) ? raw.lastPreviewJobId : null;
+  out.lastPreviewKey = DIGEST_RE.test(raw.lastPreviewKey ?? '') ? raw.lastPreviewKey : null;
   return out;
+}
+
+const DIGEST_RE = /^[0-9a-f]{14}$/;
+
+/** A short fingerprint of a preview request, enough to tell whether the script changed since
+ * that preview. Only this is saved, never the request itself: an old snapshot of the dialogue
+ * would otherwise live on in saved and shared project files after the lines were edited. */
+export function previewDigest(body) {
+  const text = JSON.stringify(body);
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return ((h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0')).slice(0, 14);
 }
 
 export function loadProject(storage = globalThis.localStorage) {

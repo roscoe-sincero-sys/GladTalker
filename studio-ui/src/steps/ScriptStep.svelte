@@ -1,7 +1,7 @@
 <script>
   import { onDestroy, tick, untrack } from 'svelte';
   import { api, revokeMedia } from '../lib/api.js';
-  import { project, newId, nextStyleIndex, audioPreviewRequest, projectGuard,
+  import { project, newId, nextStyleIndex, audioPreviewRequest, projectGuard, previewDigest,
     MAX_CAST, MAX_LINES, MAX_LINE_CHARS } from '../lib/project.svelte.js';
   import { submitting, submitPreview } from '../lib/jobs.svelte.js';
   import { goTo } from '../lib/app-state.svelte.js';
@@ -32,11 +32,13 @@
   let destroyed = false;
 
   const castNames = $derived(project.cast.map((m) => m.name.trim()).filter(Boolean));
-  const currentKey = $derived(JSON.stringify(audioPreviewRequest(project)));
+  const currentKey = $derived(previewDigest(audioPreviewRequest(project)));
   const previewResult = $derived(previewJob?.state === 'succeeded' ? previewJob.result : null);
   const previewStale = $derived(Boolean(previewResult && project.lastPreviewKey && project.lastPreviewKey !== currentKey));
-  const previewBusy = $derived(submitting.preview || previewLoading
-    || previewJob?.state === 'queued' || previewJob?.state === 'running');
+  // Busy also while re-attaching to a saved preview whose state isn't known yet, so coming back
+  // to this step on a slow connection can't start a second preview on top of it.
+  const previewSettled = $derived(previewError || ['succeeded', 'failed', 'cancelled'].includes(previewJob?.state));
+  const previewBusy = $derived(submitting.preview || previewLoading || Boolean(project.lastPreviewJobId && !previewSettled));
   const previewBlockers = $derived(audioProblems(project));
   const castFull = $derived(project.cast.length >= MAX_CAST);
   const lintFor = (line) => (warnings[line.id]?.text === line.text ? warnings[line.id].items : []);
@@ -72,9 +74,12 @@
       const seq = ++lintSeq;
       if (!lines.length) return (warnings = {});
       try {
-        const res = await api.lintLines(lines.slice(0, MAX_LINES).map((l) => l.text.slice(0, MAX_LINE_CHARS)));
+        // A line over the engine's limit isn't checked (its fixes would replace the whole line
+        // with a shortened one); it already shows an error asking for it to be split.
+        const fits = (l) => l.text.length <= MAX_LINE_CHARS;
+        const res = await api.lintLines(lines.slice(0, MAX_LINES).map((l) => (fits(l) ? l.text : '')));
         if (seq !== lintSeq || destroyed) return;
-        warnings = Object.fromEntries(lines.map((l, i) => [l.id, { text: l.text, items: res.lines[i] ?? [] }]));
+        warnings = Object.fromEntries(lines.map((l, i) => [l.id, { text: l.text, items: fits(l) ? res.lines[i] ?? [] : [] }]));
       } catch {
         /* lint is advisory: ignore failures */
       }
@@ -188,6 +193,7 @@
 
   function onfix(line, fixed) {
     if (!lintFor(line).some((w) => w.fix === fixed)) return; // the line changed since: not this fix
+    if (line.text.length > MAX_LINE_CHARS) return;
     line.text = fixed;
     announce('Applied the suggested wording.');
   }

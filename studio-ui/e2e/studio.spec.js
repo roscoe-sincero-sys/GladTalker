@@ -239,9 +239,9 @@ test('Auto-Fix suggestions disappear as soon as the line changes', async ({ page
 test('a render accepted after leaving Roll is still followed when Roll is shown again', async ({ page }) => {
   await openStudio(page);
   await readyToRoll(page);
-  await fakeRender(page, 'fake-render-1', () => renderSnapshot('fake-render-1', 'running'));
+  await fakeRender(page, 'fa0000000001', () => renderSnapshot('fa0000000001', 'running'));
   const release = await hold(page, '**/render/start',
-    (route) => route.fulfill({ status: 202, json: renderSnapshot('fake-render-1', 'queued') }));
+    (route) => route.fulfill({ status: 202, json: renderSnapshot('fa0000000001', 'queued') }));
 
   await page.getByRole('button', { name: /Render video/ }).click();
   await expect(page.getByRole('button', { name: /Starting the render/ })).toBeDisabled();
@@ -254,7 +254,54 @@ test('a render accepted after leaving Roll is still followed when Roll is shown 
   await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Render video/ })).toBeDisabled(); // no duplicate GPU job
-  await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fake-render-1'); // autosaved
+  await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fa0000000001'); // autosaved
+});
+
+test('coming back to a saved render blocks a second one until its state is known', async ({ page }) => {
+  await openStudio(page);
+  await readyToRoll(page);
+  await fakeRender(page, 'fa0000000003', () => renderSnapshot('fa0000000003', 'running'));
+  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot('fa0000000003', 'queued') }));
+  await page.getByRole('button', { name: /Render video/ }).click();
+  await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
+  await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fa0000000003');
+
+  // Reload with a slow engine: the first status answer for that render is held back.
+  await page.unroute('**/jobs/fa0000000003');
+  const release = await hold(page, '**/jobs/fa0000000003', (route) => route.fulfill({ json: renderSnapshot('fa0000000003', 'running') }));
+  await page.route('**/jobs/fa0000000003', (route) => route.fulfill({ json: renderSnapshot('fa0000000003', 'running') }));
+  let starts = 0;
+  page.on('request', (r) => { if (r.url().endsWith('/render/start')) starts++; });
+  await page.reload();
+  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Roll/ }).click();
+  await expect(page.getByText('Checking on the last render…')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeDisabled();
+  release();
+  await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeDisabled();
+  expect(starts).toBe(0);
+});
+
+test('a project file never contains a saved job id it shouldn’t follow, or lines removed after a preview', async ({ page }) => {
+  await openStudio(page);
+  await castPortrait(page);
+  // Opening a project with a forged job reference makes no job request.
+  const jobRequests = [];
+  page.on('request', (r) => { if (/\/jobs\//.test(r.url())) jobRequests.push(r.url()); });
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Open…' }).click();
+  await (await chooser).setFiles({ name: 'forged.gladtalker.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
+    version: 1, cast: [{ id: 'cb', name: 'Bea', region: { x: 0, y: 0, w: 64, h: 64 } }],
+    script: [{ id: 'lb', castId: 'cb', text: 'Hello.' }],
+    lastRenderJobId: '../models/download', lastPreviewJobId: '../hardware?x=',
+  })) });
+  for (const step of ['Script', 'Roll']) {
+    await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: new RegExp(step) }).click();
+  }
+  await page.waitForTimeout(500);
+  expect(jobRequests).toEqual([]);
+  const saved = await savedProject(page);
+  expect([saved.lastRenderJobId, saved.lastPreviewJobId]).toEqual([null, null]);
 });
 
 test('the preview button can’t start a second preview while one is being submitted', async ({ page }) => {
@@ -271,6 +318,16 @@ test('the preview button can’t start a second preview while one is being submi
   release();
   await expect(page.getByLabel('Full audio mix')).toBeVisible({ timeout: 90_000 });
   expect(posts).toBe(1);
+
+  // Edit the line, then save the project: the file has the new line only, nowhere the old one.
+  await page.getByLabel('What is said in line 1').fill('A completely new line.');
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Save project' }).click();
+  const file = await (await download).path();
+  const text = (await import('node:fs')).readFileSync(file, 'utf-8');
+  expect(text).toContain('A completely new line.');
+  expect(text).not.toContain('Hello there.');
+  expect(JSON.parse(text).lastPreviewKey).toMatch(/^[0-9a-f]{14}$/);
 });
 
 test('token mode: a caption download failure still shows the video, and captions can be retried', async ({ page }) => {
@@ -279,12 +336,12 @@ test('token mode: a caption download failure still shows the video, and captions
   await readyToRoll(page);
   const result = { video_path: 'C:/out/Ann_scene.mp4', srt_path: 'C:/out/Ann_scene.srt', vtt_path: 'C:/out/Ann_scene.vtt',
     output_dir: 'C:/out', width: 1280, height: 720, duration_s: 2, captions: [{ speaker: 'Ann', text: 'Hello there.', start_ms: 0 }] };
-  await fakeRender(page, 'fake-render-2', () => renderSnapshot('fake-render-2', 'succeeded', { result }));
-  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot('fake-render-2', 'queued') }));
-  await page.route('**/jobs/fake-render-2/files/video', (route) => route.fulfill({ body: Buffer.from('not really a video'), contentType: 'video/mp4' }));
-  await page.route('**/jobs/fake-render-2/files/srt', (route) => route.fulfill({ body: SRT }));
+  await fakeRender(page, 'fa0000000002', () => renderSnapshot('fa0000000002', 'succeeded', { result }));
+  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot('fa0000000002', 'queued') }));
+  await page.route('**/jobs/fa0000000002/files/video', (route) => route.fulfill({ body: Buffer.from('not really a video'), contentType: 'video/mp4' }));
+  await page.route('**/jobs/fa0000000002/files/srt', (route) => route.fulfill({ body: SRT }));
   let vttCalls = 0;
-  await page.route('**/jobs/fake-render-2/files/vtt', (route) => (++vttCalls === 1
+  await page.route('**/jobs/fa0000000002/files/vtt', (route) => (++vttCalls === 1
     ? route.fulfill({ status: 503, json: { detail: 'The disk was busy.' } })
     : route.fulfill({ body: VTT, contentType: 'text/vtt' })));
 
@@ -292,7 +349,7 @@ test('token mode: a caption download failure still shows the video, and captions
   await expect(page.getByRole('heading', { name: 'Your video' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Download video (MP4)' })).toHaveAttribute('download', 'Ann_scene.mp4');
   await expect(page.getByText(/The captions couldn’t be loaded: The disk was busy\./)).toBeVisible();
-  await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fake-render-2'); // autosaved
+  await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fa0000000002'); // autosaved
 
   await page.getByRole('button', { name: 'Try loading the captions again' }).click();
   await expect(page.getByRole('link', { name: 'Download captions (WebVTT)' })).toHaveAttribute('download', 'Ann_scene.vtt');

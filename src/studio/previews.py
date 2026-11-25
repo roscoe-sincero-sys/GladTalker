@@ -40,8 +40,11 @@ class _FileLock:
         self.path = path
         self._file = None
 
-    def acquire(self) -> bool:
-        f = open(self.path, "a+b")
+    def acquire(self, create: bool = True) -> bool:
+        """Take the lock without waiting. With ``create=False`` the file must already exist
+        (``FileNotFoundError`` otherwise): used to test another engine's lock without leaving a
+        new file behind in a folder that may be in the middle of being deleted."""
+        f = open(self.path, "a+b" if create else "r+b")
         try:
             if os.name == "nt":
                 import msvcrt
@@ -147,7 +150,12 @@ class PreviewStore:
                 continue  # possibly an engine that is just starting up
             if marker.exists():
                 lock = _FileLock(marker)
-                if not lock.acquire():
-                    continue  # its engine is running: hands off
+                try:
+                    if not lock.acquire(create=False):
+                        continue  # its engine is running: hands off
+                except FileNotFoundError:
+                    continue  # another engine reclaimed this folder first: nothing left to do
+                except OSError:
+                    continue  # can't tell (permissions, a share hiccup): leave it for next time
                 lock.release()
             shutil.rmtree(folder, ignore_errors=True)

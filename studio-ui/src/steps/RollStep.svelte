@@ -33,6 +33,9 @@
 
   const problems = $derived(renderProblems(project, { models: engine.models, ffmpeg: engine.hardware?.ffmpeg?.available ?? null }));
   const running = $derived(job && (job.state === 'queued' || job.state === 'running'));
+  // Following a saved render whose state hasn't arrived yet (slow connection, engine busy): treat
+  // it as running until the engine says it has finished or is gone, so it can't be doubled up.
+  const checking = $derived(Boolean(project.lastRenderJobId && !job));
   const preset = $derived(PRESETS.find((p) => p.id === project.output.preset) ?? PRESETS[0]);
   const layout = $derived(project.image
     ? frameLayout(project.image.width, project.image.height, preset.size?.[0], preset.size?.[1], project.output.fit) : null);
@@ -244,9 +247,10 @@
 
   <section class="card block" aria-labelledby="render-heading">
     <h3 id="render-heading">Render</h3>
-    <button type="button" class="primary big" onclick={render} disabled={problems.length > 0 || running || submitting.render}
+    <button type="button" class="primary big" onclick={render} disabled={problems.length > 0 || running || checking || submitting.render}
       aria-describedby={problems.length ? 'render-blocked' : undefined}>🎬 {submitting.render ? 'Starting the render…' : 'Render video'}</button>
     {#if problems.length}<p class="muted" id="render-blocked">Fix the items above to enable rendering.</p>{/if}
+    {#if checking}<p class="muted" role="status">Checking on the last render…</p>{/if}
     {#if startError}<p class="error-text">{startError}</p>{/if}
     <JobProgress {job} id="render-job" label="Render progress" oncancel={running ? cancel : null}
       stageLabels={{ audio: 'Voices and timing', compose: 'Compose and encode' }} />

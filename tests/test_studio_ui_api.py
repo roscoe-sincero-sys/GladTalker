@@ -223,6 +223,27 @@ class PreviewRetentionTests(unittest.TestCase):
         self._store(stale_s=0).new_folder("c", self.jobs)
         self.assertFalse(dead.dir.exists())
 
+    def test_two_engines_racing_to_reclaim_the_same_folder_both_carry_on(self):
+        from src.studio import previews
+
+        dead = PreviewStore(self.root, stale_s=0)
+        self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()
+        dead._lock = None
+        original = previews._FileLock.acquire
+
+        def other_engine_wins(lock, *args, **kwargs):
+            # The other engine deletes the folder between our "marker exists" check and our open.
+            if lock.path.parent == dead.dir:
+                shutil.rmtree(dead.dir)
+            return original(lock, *args, **kwargs)
+
+        store = self._store(stale_s=0)
+        with mock.patch.object(previews._FileLock, "acquire", other_engine_wins):
+            folder = store.new_folder("j2", self.jobs)  # must not raise FileNotFoundError
+        self.assertEqual(folder.parent, store.dir)
+        self.assertFalse(dead.dir.exists())
+
     def test_clean_shutdown_removes_its_own_folder(self):
         store = PreviewStore(self.root)
         self._write(store.new_folder("j", self.jobs))

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultProject, normalizeProject, loadProject, saveProject, renderRequest, audioPreviewRequest,
-  nextStyleIndex, STORAGE_KEY, PROJECT_VERSION, projectGuard, replaceProject, MAX_CAST,
+  nextStyleIndex, STORAGE_KEY, PROJECT_VERSION, projectGuard, replaceProject, MAX_CAST, previewDigest,
 } from '../src/lib/project.svelte.js';
 import { renderProblems, problemsForStep, audioProblems } from '../src/lib/validate.js';
 import { moveLine, linesFromParse, nameKey } from '../src/lib/script-lines.js';
@@ -114,6 +114,30 @@ describe('render checklist (WCAG 3.3.1 / 3.3.3)', () => {
     expect(audioProblems(p)).toEqual([]);
     p.script[1].castId = null;
     expect(audioProblems(p).map((x) => x.fieldId)).toEqual(['speaker-l2']);
+  });
+});
+
+describe('saved job references', () => {
+  it('keeps only engine-made job ids and preview digests from a project file', () => {
+    const body = audioPreviewRequest(sample());
+    const good = normalizeProject({ ...sample(), lastRenderJobId: '0123456789ab', lastPreviewJobId: 'abcdef012345',
+      lastPreviewKey: previewDigest(body) });
+    expect([good.lastRenderJobId, good.lastPreviewJobId, good.lastPreviewKey]).toEqual(['0123456789ab', 'abcdef012345', previewDigest(body)]);
+
+    const bad = normalizeProject({ ...sample(), lastRenderJobId: '../hardware', lastPreviewJobId: { id: 'x' },
+      lastPreviewKey: JSON.stringify(body) });
+    expect([bad.lastRenderJobId, bad.lastPreviewJobId, bad.lastPreviewKey]).toEqual([null, null, null]);
+    expect(bad.cast).toHaveLength(2); // the rest of the project is kept
+    expect(bad.script).toHaveLength(2);
+  });
+
+  it('fingerprints a preview request without keeping its text', () => {
+    const p = sample();
+    const before = previewDigest(audioPreviewRequest(p));
+    expect(before).toMatch(/^[0-9a-f]{14}$/);
+    expect(previewDigest(audioPreviewRequest(sample()))).toBe(before);
+    p.script[0].text = 'Something else entirely.';
+    expect(previewDigest(audioPreviewRequest(p))).not.toBe(before);
   });
 });
 

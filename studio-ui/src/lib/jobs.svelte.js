@@ -4,7 +4,7 @@
 // whenever it is shown. A submission is dropped only if New/Open replaced the project meanwhile.
 
 import { api } from './api.js';
-import { project, projectGuard } from './project.svelte.js';
+import { project, projectGuard, previewDigest } from './project.svelte.js';
 
 /** True while a request is on its way, so a second click can't start a duplicate job. */
 export const submitting = $state({ render: false, preview: false });
@@ -24,7 +24,7 @@ export async function submitRender(body) {
 }
 
 /** Starts a full-mix preview of `body` (an audioPreviewRequest). The request is remembered as
- * `lastPreviewKey`, so the Script step can tell when the script has changed since. */
+ * a digest in `lastPreviewKey`, so the Script step can tell when the script has changed since. */
 export async function submitPreview(body) {
   if (submitting.preview) return null;
   submitting.preview = true;
@@ -33,7 +33,7 @@ export async function submitPreview(body) {
     const job = await api.previewAudio(body);
     if (!current()) return null;
     project.lastPreviewJobId = job.id;
-    project.lastPreviewKey = JSON.stringify(body);
+    project.lastPreviewKey = previewDigest(body);
     return job;
   } finally {
     submitting.preview = false;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createApi, readEngineToken, ApiError, basename, revokeMedia } from '../src/lib/api.js';
+import { createApi, readEngineToken, ApiError, basename, revokeMedia, isJobId } from '../src/lib/api.js';
 
 const json = (status, body) => ({ ok: status < 400, status, json: async () => body, blob: async () => new Blob(['x']) });
 
@@ -54,6 +54,24 @@ describe('requests', () => {
   });
 });
 
+describe('job ids', () => {
+  it('never puts anything but an engine-made job id into a request URL', async () => {
+    const fetchImpl = vi.fn(async () => json(200, {}));
+    const api = createApi({ fetchImpl, token: 's3cret', WebSocketImpl: FakeSocket });
+    for (const bad of ['../hardware', '../../models/download', 'abc', '0123456789AB', '0123456789abc', '', null, 7]) {
+      await expect(api.job(bad)).rejects.toMatchObject({ status: 400 });
+      await expect(api.cancelJob(bad)).rejects.toMatchObject({ status: 400 });
+      await expect(api.fileUrl(bad, 'video')).rejects.toMatchObject({ status: 400 });
+      expect(() => api.plainFileUrl(bad, 'video')).toThrow(ApiError);
+      await expect(api.watchJob(bad, () => {}).done).rejects.toMatchObject({ status: 400 });
+    }
+    await expect(api.fileUrl('0123456789ab', '../../uploads')).rejects.toMatchObject({ status: 400 });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(isJobId('0123456789ab')).toBe(true);
+    expect(api.plainFileUrl('0123456789ab', 'srt')).toBe('/jobs/0123456789ab/files/srt');
+  });
+});
+
 describe('engine token from the URL fragment', () => {
   it('moves #token into sessionStorage and removes it from the address bar', () => {
     const replaceState = vi.fn();
@@ -84,35 +102,35 @@ class FakeSocket {
 
 describe('watchJob', () => {
   it('streams events over a ticketed WebSocket until the job ends', async () => {
-    const fetchImpl = vi.fn(async (url) => json(200, { url: '/ws/jobs/j1?ticket=T', ticket: 'T' }));
+    const fetchImpl = vi.fn(async (url) => json(200, { url: '/ws/jobs/000000000001?ticket=T', ticket: 'T' }));
     const api = createApi({ fetchImpl, WebSocketImpl: FakeSocket, location: { protocol: 'http:', host: '127.0.0.1:7860' } });
     const seen = [];
-    const watch = api.watchJob('j1', (j) => seen.push(j.state));
-    await vi.waitFor(() => expect(FakeSocket.last?.url).toBe('ws://127.0.0.1:7860/ws/jobs/j1?ticket=T'));
-    FakeSocket.last.emit({ id: 'j1', state: 'running', progress: 0.5 });
-    FakeSocket.last.emit({ id: 'j1', state: 'succeeded', progress: 1 });
+    const watch = api.watchJob('000000000001', (j) => seen.push(j.state));
+    await vi.waitFor(() => expect(FakeSocket.last?.url).toBe('ws://127.0.0.1:7860/ws/jobs/000000000001?ticket=T'));
+    FakeSocket.last.emit({ id: '000000000001', state: 'running', progress: 0.5 });
+    FakeSocket.last.emit({ id: '000000000001', state: 'succeeded', progress: 1 });
     expect((await watch.done).state).toBe('succeeded');
     expect(seen).toEqual(['running', 'succeeded']);
-    expect(fetchImpl.mock.calls[0][0]).toBe('/jobs/j1/ws-ticket');
+    expect(fetchImpl.mock.calls[0][0]).toBe('/jobs/000000000001/ws-ticket');
   });
 
   it('falls back to polling when the WebSocket is refused', async () => {
     const states = ['running', 'succeeded'];
     const fetchImpl = vi.fn(async (url) => (url.endsWith('ws-ticket')
-      ? json(200, { url: '/ws/jobs/j2?ticket=T' })
-      : json(200, { id: 'j2', state: states.shift() ?? 'succeeded' })));
+      ? json(200, { url: '/ws/jobs/000000000002?ticket=T' })
+      : json(200, { id: '000000000002', state: states.shift() ?? 'succeeded' })));
     const api = createApi({ fetchImpl, WebSocketImpl: FakeSocket, location: { protocol: 'http:', host: 'h' } });
-    const watch = api.watchJob('j2', () => {}, { pollMs: 5 });
-    await vi.waitFor(() => expect(FakeSocket.last?.url).toContain('/ws/jobs/j2'));
+    const watch = api.watchJob('000000000002', () => {}, { pollMs: 5 });
+    await vi.waitFor(() => expect(FakeSocket.last?.url).toContain('/ws/jobs/000000000002'));
     FakeSocket.last.close(); // refused before any event
     expect((await watch.done).state).toBe('succeeded');
   });
 
   it('stops with an error when the job is gone (engine restarted or job evicted)', async () => {
-    const fetchImpl = vi.fn(async () => json(404, { detail: "No job with id 'j3'." }));
+    const fetchImpl = vi.fn(async () => json(404, { detail: "No job with id '000000000003'." }));
     const api = createApi({ fetchImpl, WebSocketImpl: null });
-    const watch = api.watchJob('j3', () => {}, { pollMs: 1 });
-    await expect(watch.done).rejects.toMatchObject({ name: 'ApiError', status: 404, message: "No job with id 'j3'." });
+    const watch = api.watchJob('000000000003', () => {}, { pollMs: 1 });
+    await expect(watch.done).rejects.toMatchObject({ name: 'ApiError', status: 404, message: "No job with id '000000000003'." });
     const calls = fetchImpl.mock.calls.length;
     await new Promise((r) => setTimeout(r, 20));
     expect(fetchImpl.mock.calls.length).toBe(calls); // and stops polling
@@ -121,7 +139,7 @@ describe('watchJob', () => {
   it('also stops when the ticket request is refused (wrong token)', async () => {
     const fetchImpl = vi.fn(async () => json(401, { detail: 'Missing or invalid Studio token.' }));
     const api = createApi({ fetchImpl, WebSocketImpl: FakeSocket, location: { protocol: 'http:', host: 'h' } });
-    await expect(api.watchJob('j4', () => {}).done).rejects.toMatchObject({ status: 401 });
+    await expect(api.watchJob('000000000004', () => {}).done).rejects.toMatchObject({ status: 401 });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -132,10 +150,10 @@ describe('watchJob', () => {
       const fetchImpl = vi.fn(async () => {
         n++;
         if (n <= 3) throw new TypeError('Failed to fetch');
-        return json(200, { id: 'j5', state: 'succeeded' });
+        return json(200, { id: '000000000005', state: 'succeeded' });
       });
       const api = createApi({ fetchImpl, WebSocketImpl: null });
-      const watch = api.watchJob('j5', () => {}, { pollMs: 100 });
+      const watch = api.watchJob('000000000005', () => {}, { pollMs: 100 });
       await vi.advanceTimersByTimeAsync(0);
       expect(n).toBe(1);
       await vi.advanceTimersByTimeAsync(199);
@@ -152,9 +170,9 @@ describe('watchJob', () => {
   });
 
   it('close() resolves with null and stops all traffic', async () => {
-    const fetchImpl = vi.fn(async () => json(200, { id: 'j6', state: 'running' }));
+    const fetchImpl = vi.fn(async () => json(200, { id: '000000000006', state: 'running' }));
     const api = createApi({ fetchImpl, WebSocketImpl: null });
-    const watch = api.watchJob('j6', () => {}, { pollMs: 1 });
+    const watch = api.watchJob('000000000006', () => {}, { pollMs: 1 });
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
     watch.close();
     expect(await watch.done).toBeNull();
