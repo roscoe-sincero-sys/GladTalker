@@ -490,6 +490,48 @@ def require_ffmpeg_user_facing() -> str:
         raise UserFacingError(str(exc)) from exc
 
 
+def preview_audio(ctx: JobContext, req, out_dir: Path, tts: TTSService) -> dict:
+    """Job body for ``POST /audio/preview``: build the exact soundtrack a render would use (same
+    voices, tempo, and timeline) so it can be heard, and its pacing checked, before any video
+    frames are rendered."""
+    ffmpeg = require_ffmpeg_user_facing()
+    ctx.set_stages(["audio"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = out_dir / "work"
+    n = len(req.script)
+    ctx.progress(0.0, f"Synthesizing voices (line 1 of {n})…", stage="audio")
+
+    def on_line(done: int, total: int) -> None:
+        ctx.progress(0.9 * done / total, f"Synthesizing voices (line {min(done + 1, total)} of {total})…",
+                     stage="audio")
+
+    target_ms = int(round(req.pacing.target_duration_s * 1000)) if req.pacing.target_duration_s else None
+    try:
+        audio = build_dialogue_audio(
+            [(line.speaker, line.text) for line in req.script],
+            {v.name: v.semitones for v in req.cast},
+            tts, str(work_dir), target_ms=target_ms, gap_ms=req.pacing.gap_ms, ffmpeg=ffmpeg, on_line=on_line,
+        )
+        audio_path = out_dir / "preview.wav"
+        shutil.move(audio.master_wav, audio_path)
+    except DialogueTooLongError as exc:
+        raise UserFacingError(str(exc)) from exc
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    plan = audio.plan
+    return {
+        "audio_path": str(audio_path),
+        "duration_s": round(plan.total_ms / 1000.0, 3),
+        "tempo": round(audio.tempo, 4),
+        "frames": plan.total_frames,
+        "speaker_frames": plan.speaker_frames,
+        "captions": [
+            {"speaker": s.speaker, "text": s.text, "start_ms": s.start_ms, "end_ms": s.end_ms} for s in plan.spans
+        ],
+    }
+
+
 def encode_frames(ctx: JobContext, prog: _Progress, plan, canvas: np.ndarray, dst: dict,
                   readers: dict, master_wav: str, video_path: str, crf: int, ffmpeg: str) -> None:
     """Stream composited BGR frames into FFmpeg (H.264 + AAC), muxing the master dialogue track."""

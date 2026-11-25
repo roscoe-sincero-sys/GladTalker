@@ -125,26 +125,61 @@ class RenderRequest(_Model):
 
     @model_validator(mode="after")
     def _check_cast_and_script(self) -> "RenderRequest":
-        seen: dict[str, str] = {}
-        for member in self.cast:
-            key = name_key(member.name)
-            if key in seen:
-                raise ValueError(f"Cast member name '{member.name}' is used more than once.")
-            seen[key] = member.name
-        for i, line in enumerate(self.script, start=1):
-            canonical = seen.get(name_key(line.speaker))
-            if canonical is None:
-                raise ValueError(
-                    f"Line {i}: speaker '{line.speaker}' is not in the cast. "
-                    f"Known cast: {', '.join(seen.values())}."
-                )
-            line.speaker = canonical
+        _link_script_to_cast([m.name for m in self.cast], self.script)
+        return self
+
+
+def _link_script_to_cast(cast_names: list[str], script: list["DialogueLine"]) -> None:
+    """Reject duplicate cast names and unknown speakers; rewrite each line's speaker to the cast's
+    exact spelling (names match ignoring case and spacing)."""
+    seen: dict[str, str] = {}
+    for name in cast_names:
+        key = name_key(name)
+        if key in seen:
+            raise ValueError(f"Cast member name '{name}' is used more than once.")
+        seen[key] = name
+    for i, line in enumerate(script, start=1):
+        canonical = seen.get(name_key(line.speaker))
+        if canonical is None:
+            raise ValueError(
+                f"Line {i}: speaker '{line.speaker}' is not in the cast. "
+                f"Known cast: {', '.join(seen.values())}."
+            )
+        line.speaker = canonical
+
+
+class Voice(_Model):
+    name: str = Field(min_length=1, max_length=64)
+    semitones: float = Field(0.0, ge=MIN_SEMITONES, le=MAX_SEMITONES)
+
+
+class AudioPreviewRequest(_Model):
+    """Everything that shapes the soundtrack (no image or regions): for "Play full audio mix"."""
+
+    cast: list[Voice] = Field(min_length=1, max_length=MAX_CAST)
+    script: list[DialogueLine] = Field(min_length=1, max_length=500)
+    pacing: Pacing = Field(default_factory=Pacing)
+
+    @model_validator(mode="after")
+    def _check_cast_and_script(self) -> "AudioPreviewRequest":
+        _link_script_to_cast([v.name for v in self.cast], self.script)
         return self
 
 
 class ScriptParseRequest(_Model):
     text: str = Field(max_length=200_000)
     cast: list[str] = Field(default_factory=list, max_length=MAX_CAST * 4)
+
+
+class ScriptLintRequest(_Model):
+    lines: list[str] = Field(max_length=500)
+
+    @field_validator("lines")
+    @classmethod
+    def _cap_length(cls, v: list[str]) -> list[str]:
+        if any(len(line) > 1000 for line in v):
+            raise ValueError("Each line must be at most 1000 characters.")
+        return v
 
 
 class TTSPreviewRequest(_Model):

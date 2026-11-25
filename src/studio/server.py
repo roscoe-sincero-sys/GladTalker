@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -49,13 +50,15 @@ from src.studio.ffmpeg import FFmpegError, find_ffmpeg
 from src.studio.hardware import DeviceManager, download_models, hardware_report, models_status
 from src.studio.jobs import TERMINAL_STATES, Job, JobManager, UserFacingError
 from src.studio.schemas import (
+    AudioPreviewRequest,
     CastDetectRequest,
     ModelsDownloadRequest,
     RenderRequest,
+    ScriptLintRequest,
     ScriptParseRequest,
     TTSPreviewRequest,
 )
-from src.studio.script import parse_script
+from src.studio.script import lint_line, parse_script
 from src.studio.security import (
     DEFAULT_BODY_LIMIT,
     StudioGuard,
@@ -70,7 +73,19 @@ DEFAULT_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri
 DEFAULT_HOSTS = ["127.0.0.1", "localhost", "[::1]", "::1"]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 FILE_KINDS = {"video": ("video_path", "video/mp4"), "srt": ("srt_path", "application/x-subrip"),
-              "vtt": ("vtt_path", "text/vtt")}
+              "vtt": ("vtt_path", "text/vtt"), "audio": ("audio_path", "audio/wav")}
+UPLOAD_NAME_RE = re.compile(r"^[0-9a-f]{32}\.(png|jpg|jpeg|bmp|webp)$")
+UI_DIST = REPO_ROOT / "studio-ui" / "dist"
+# The Studio UI only loads its own files; it talks to this engine (fetch + WebSocket) and shows
+# uploaded images and rendered media through blob: URLs.
+UI_HEADERS = [
+    (b"content-security-policy",
+     b"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+     b"img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; "
+     b"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+]
 
 
 def _version() -> str:
@@ -106,7 +121,7 @@ class StudioServices:
             devices=DeviceManager(config.device),
             tts=TTSService(),
             detector=FaceDetectorService(device=config.detector_device),
-            jobs=JobManager(lanes={"gpu": 1, "io": 2}),
+            jobs=JobManager(lanes={"gpu": 1, "io": 2, "audio": 1}),
         )
 
 
@@ -245,10 +260,41 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
             "elapsed_s": round(time.perf_counter() - t0, 2),
         }
 
+    @app.get("/uploads/{name}")
+    def uploaded_image(name: str):
+        """Serve an image previously stored by POST /uploads (only those files, by their
+        generated names) so the UI can show the scene again after a reload."""
+        if not UPLOAD_NAME_RE.match(name):
+            raise HTTPException(404, "No such upload.")
+        path = workspace / "uploads" / name
+        if not path.is_file():
+            raise HTTPException(404, "No such upload.")
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=3600"})
+
     # -- Script --------------------------------------------------------------------------------
     @app.post("/script/parse")
     def script_parse(body: ScriptParseRequest) -> dict:
         return parse_script(body.text, body.cast).to_dict()
+
+    @app.post("/script/lint")
+    def script_lint(body: ScriptLintRequest) -> dict:
+        """Pronunciation/quality warnings for individual lines (the editor re-checks as you type)."""
+        from dataclasses import asdict
+
+        return {"lines": [[asdict(w) for w in lint_line(text)] if text.strip() else [] for text in body.lines]}
+
+    @app.post("/audio/preview", status_code=202)
+    def audio_preview(body: AudioPreviewRequest) -> dict:
+        """Start building the full soundtrack (voices + pacing) to listen to before rendering."""
+        from src.studio import pipeline
+
+        pipeline.require_ffmpeg_user_facing()
+
+        def run(ctx):
+            out_dir = workspace / "previews" / f"{time.strftime('%Y%m%d_%H%M%S')}_{ctx.job.id}"
+            return pipeline.preview_audio(ctx, body, out_dir, services.tts)
+
+        return services.jobs.submit("audio.preview", "Preview audio mix", run, lane="audio").snapshot()
 
     @app.post("/tts/preview", response_class=Response,
               responses={200: {"content": {"audio/wav": {}}}})
@@ -381,4 +427,24 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
                 except RuntimeError:
                     pass
 
+    if (UI_DIST / "index.html").is_file():
+        # Mounted last so every API route above takes precedence.
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/", _with_headers(StaticFiles(directory=UI_DIST, html=True), UI_HEADERS), name="ui")
+
     return app
+
+
+def _with_headers(asgi_app, headers):
+    """Wrap an ASGI app so every response it sends carries ``headers``."""
+
+    async def wrapped(scope, receive, send):
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                message = {**message, "headers": [*message.get("headers", []), *headers]}
+            await send(message)
+
+        await asgi_app(scope, receive, send_with_headers)
+
+    return wrapped

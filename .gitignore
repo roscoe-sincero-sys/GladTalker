@@ -172,3 +172,8 @@ checkpoints
 
 # Mac
 .DS_Store
+
+# Studio UI (build output studio-ui/dist IS committed so Python-only users get the UI)
+studio-ui/node_modules/
+studio-ui/test-results/
+studio-ui/playwright-report/

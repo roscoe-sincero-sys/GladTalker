@@ -1,0 +1,203 @@
+/* GladTalker Studio: calm studio styling. Token values are mirrored in src/lib/palette.js and
+   checked for WCAG contrast by tests/palette.test.js. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --surface: #f4f5f8;
+  --surface-2: #e9ebf0;
+  --text: #1b1e24;
+  --muted: #4a5160;
+  --accent: #1f5fbf;
+  --accent-text: #ffffff;
+  --border: #767d8c;
+  --error: #b42318;
+  --success: #12733b;
+  --focus: #1f5fbf;
+  --radius: 10px;
+  --gap: 1rem;
+  --header-h: 4.5rem;
+  --footer-h: 4rem;
+  --target: 2.25rem; /* 36px comfortable targets (WCAG 2.5.8 minimum is 24px) */
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 100%;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17161a;
+    --surface: #221f27;
+    --surface-2: #2c2833;
+    --text: #f2eff5;
+    --muted: #bdb7c7;
+    --accent: #8fb4ff;
+    --accent-text: #10131a;
+    --border: #8d8799;
+    --error: #ff9b8f;
+    --success: #7ad69b;
+    --focus: #8fb4ff;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  /* Keep the focused element clear of the sticky header and footer (WCAG 2.4.11). */
+  scroll-padding-top: calc(var(--header-h) + 1rem);
+  scroll-padding-bottom: calc(var(--footer-h) + 1rem);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+h1, h2, h3, h4 { line-height: 1.25; margin: 0 0 0.5em; }
+h1 { font-size: 1.25rem; }
+h2 { font-size: 1.35rem; }
+h3 { font-size: 1.1rem; }
+p { margin: 0 0 0.75em; }
+a { color: var(--accent); }
+
+/* Visible, persistent focus for every interactive element (WCAG 2.4.7, 1.4.11). */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+[tabindex='-1']:focus { outline: none; }
+[tabindex='-1']:focus-visible { outline: 3px solid var(--focus); }
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}
+
+.skip-link {
+  position: absolute; left: 0.5rem; top: -10rem; z-index: 100;
+  padding: 0.5rem 1rem; background: var(--accent); color: var(--accent-text);
+  border-radius: var(--radius); font-weight: 600;
+}
+.skip-link:focus { top: 0.5rem; }
+
+/* ---- Buttons & fields ------------------------------------------------------------------ */
+button, .button, input, select, textarea { font: inherit; color: inherit; }
+
+button, .button {
+  min-height: var(--target);
+  min-width: var(--target);
+  padding: 0.35rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+  text-decoration: none;
+  line-height: 1.2;
+}
+button:hover:not(:disabled), .button:hover { background: var(--surface-2); }
+button:disabled { cursor: not-allowed; opacity: 0.65; }
+button.primary, .button.primary {
+  background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.danger { color: var(--error); border-color: var(--error); background: transparent; }
+button.icon { padding: 0.35rem; }
+button[aria-pressed='true'] { background: var(--surface-2); border-width: 2px; }
+
+input[type='text'], input[type='number'], input:not([type]), select, textarea {
+  min-height: var(--target);
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  max-width: 100%;
+}
+textarea { width: 100%; min-height: 8rem; resize: vertical; }
+input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='true'] {
+  border: 2px solid var(--error);
+}
+input[type='checkbox'], input[type='radio'] { width: 1.25rem; height: 1.25rem; accent-color: var(--accent); }
+
+label { font-weight: 600; }
+.field { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.75rem; }
+.field .hint { font-weight: 400; color: var(--muted); font-size: 0.9rem; }
+.error-text { color: var(--error); font-weight: 600; margin: 0.25rem 0; }
+.error-text::before { content: '⚠ '; }
+.ok-text { color: var(--success); font-weight: 600; }
+.ok-text::before { content: '✓ '; }
+.muted { color: var(--muted); }
+
+fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 1rem 1rem; margin: 0 0 1rem; min-width: 0; }
+legend { font-weight: 700; padding: 0 0.35rem; }
+
+.row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.stack > * + * { margin-top: var(--gap); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+progress { width: 100%; height: 1.25rem; accent-color: var(--accent); }
+meter { width: 100%; height: 1.25rem; }
+
+/* ---- Layout ------------------------------------------------------------------------------ */
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+
+.app-header {
+  position: sticky; top: 0; z-index: 10;
+  min-height: var(--header-h);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.5rem;
+  padding: 0.6rem 1.25rem;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: baseline; gap: 0.5rem; margin-right: auto; }
+.brand .version { color: var(--muted); font-size: 0.85rem; font-weight: 400; }
+.help-button { order: 3; } /* always last, top-right (WCAG 3.2.6 consistent help) */
+
+main { flex: 1; width: 100%; max-width: 90rem; margin: 0 auto; padding: 1.25rem; }
+main:focus { outline: none; }
+
+.app-footer {
+  position: sticky; bottom: 0; z-index: 10;
+  min-height: var(--footer-h);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;
+  padding: 0.5rem 1.25rem;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+.app-footer .status { margin-right: auto; color: var(--muted); font-size: 0.95rem; }
+
+.two-col { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(18rem, 1fr); gap: 1.25rem; align-items: start; }
+@media (max-width: 60rem) {
+  .two-col { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 30rem) {
+  main { padding: 0.75rem; }
+  .app-header, .app-footer { padding: 0.5rem 0.75rem; }
+  /* Sticky bars would cover too much of a short/narrow viewport at 200%+ zoom. */
+  .app-header, .app-footer { position: static; }
+}
+
+/* ---- Motion & forced colors ------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+@media (forced-colors: active) {
+  button, .button, input, select, textarea, fieldset, .card { border: 1px solid CanvasText; }
+  button.primary { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  :focus-visible { outline: 3px solid Highlight; }
+  .badge svg path { fill: CanvasText; }
+  .badge .num { color: Canvas; }
+}
