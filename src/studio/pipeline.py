@@ -1,6 +1,6 @@
 """Roll: render a multi-character talking scene end to end.
 
-Generalizes ``results/RECREATE_GoogleMeet_PHM_42s.md`` (two hard-coded characters at 1280x720)
+Generalizes the hand-written render script described in issue #11 (two hard-coded characters at 1280x720)
 to any cast, script, pacing, and output framing:
 
     audio  -> TTS + per-speaker pitch, frame-locked master and per-speaker turn tracks
@@ -67,17 +67,51 @@ def read_image(path: str) -> np.ndarray:
 
 def write_image(path: str, image: np.ndarray) -> None:
     """cv2.imwrite that also handles non-ASCII Windows paths."""
-    import cv2
+    from src.utils.safe_io import imwrite
 
-    ok, buf = cv2.imencode(Path(path).suffix or ".png", image)
-    if not ok:
+    if not imwrite(path, image):
         raise RuntimeError(f"Could not encode image for {path}")
-    buf.tofile(path)
 
 
 def resolve_path(path: str) -> Path:
     p = Path(path).expanduser()
     return p if p.is_absolute() else (REPO_ROOT / p)
+
+
+# SadTalker keeps every rendered frame of a character in RAM as float32 RGB, then copies it while
+# stacking and converting; ~3 copies are alive at the peak.
+_RENDER_COPIES = 3
+MEMORY_HEADROOM = 0.8  # use at most this share of currently available RAM
+
+
+def estimate_render_bytes(frames: int, size: int) -> int:
+    return int(frames) * size * size * 3 * 4 * _RENDER_COPIES
+
+
+def check_memory_budget(speaker_frames: dict[str, int], size: int,
+                        available_bytes: Optional[int] = None) -> None:
+    """Refuse renders whose longest speaking part would not fit in memory (characters are
+    rendered one at a time, so the peak is the largest single part)."""
+    if not speaker_frames:
+        return
+    if available_bytes is None:
+        try:
+            import psutil
+
+            available_bytes = psutil.virtual_memory().available
+        except Exception:  # noqa: BLE001 - without psutil, skip the check rather than block renders
+            return
+    name, frames = max(speaker_frames.items(), key=lambda kv: kv[1])
+    need = estimate_render_bytes(frames, size)
+    budget = int(available_bytes * MEMORY_HEADROOM)
+    if need > budget:
+        gib = 1024 ** 3
+        hint = " or switch to 256 px quality" if size > 256 else ""
+        raise UserFacingError(
+            f"{name} speaks for {frames / FPS:.0f}s, which needs about {need / gib:.1f} GB of memory to "
+            f"render at {size} px, but only {available_bytes / gib:.1f} GB is free. Shorten {name}'s "
+            f"lines, split the scene into shorter parts{hint}, or close other applications."
+        )
 
 
 @dataclass
@@ -181,11 +215,18 @@ def check_models(root: Path = REPO_ROOT, quality_mode: str = "standard", size: i
     needed += [weights / "alignment_WFLW_4HG.pth", weights / "detection_Resnet50_Final.pth"]
     if quality_mode == "enhanced":
         needed += [weights / "GFPGANv1.4.pth", weights / "parsing_parsenet.pth"]
+    from scripts.download_models import expected_for, is_complete
+
     missing = [p.name for p in needed if not p.is_file()]
-    if missing:
-        raise UserFacingError(
-            f"Some models aren't downloaded yet ({', '.join(missing)}). Choose Download Models first."
-        )
+    broken = [p.name for p in needed
+              if p.is_file() and not is_complete(p, expected_for(p.relative_to(root).as_posix()))]
+    if missing or broken:
+        parts = []
+        if missing:
+            parts.append(f"not downloaded yet: {', '.join(missing)}")
+        if broken:
+            parts.append(f"incomplete or damaged: {', '.join(broken)}")
+        raise UserFacingError(f"Some models are {'; '.join(parts)}. Choose Download Models first.")
 
 
 # --------------------------------------------------------------------------------------------
@@ -290,11 +331,12 @@ def render(ctx: JobContext, req: RenderRequest, out_dir: Path, tts: TTSService, 
                     total_frames=plan.total_frames)
 
         # ---- 2. SadTalker per character ------------------------------------------------------
+        check_memory_budget({n: plan.speaker_frames.get(n, 0) for n in speakers_in_script}, req.quality.size)
+
         import inference
-        from src.studio.faces import install_retinaface_fallback
+        from src.studio.faces import retinaface_fallback
         from src.studio.progress import report_progress
 
-        install_retinaface_fallback()
         total_render_frames = sum(plan.speaker_frames.get(n, 0) for n in speakers_in_script) or 1
         substeps = _SUBSTEPS[req.quality.mode]
         renders: dict[str, str] = {}
@@ -335,7 +377,7 @@ def render(ctx: JobContext, req: RenderRequest, out_dir: Path, tts: TTSService, 
                             stage=stage, force=(done == total), character=name, frame=shown, frames=frames)
 
             t_r = time.perf_counter()
-            with report_progress(hook):
+            with report_progress(hook), retinaface_fallback():
                 video = inference.main(_sadtalker_args(
                     tile_path, audio.speaker_wavs[name], str(work_dir / f"{safe}_sadtalker"), device, req
                 ))
@@ -366,13 +408,18 @@ def render(ctx: JobContext, req: RenderRequest, out_dir: Path, tts: TTSService, 
         paste_clipped(canvas, scaled, layout.offset_x, layout.offset_y)
 
         dst = {m.name: layout.map_box(m.region.as_box()) for m in req.cast}
-        readers = {name: SequentialFrames(path) for name, path in renders.items()}
         stem = req.output.filename or f"gladtalker_{time.strftime('%Y%m%d_%H%M%S')}"
         video_path = out_dir / f"{stem}.mp4"
-        encode_frames(ctx, prog, plan, canvas, dst, readers, str(audio.master_wav), str(video_path),
-                      req.output.crf, ffmpeg)
-        for r in readers.values():
-            r.close()
+        readers: dict[str, SequentialFrames] = {}
+        try:
+            for name, path in renders.items():
+                readers[name] = SequentialFrames(path)
+            encode_frames(ctx, prog, plan, canvas, dst, readers, str(audio.master_wav), str(video_path),
+                          req.output.crf, ffmpeg)
+        finally:
+            # Release file handles before the work directory is deleted (Windows locks open files).
+            for r in readers.values():
+                r.close()
         timings["compose_s"] = round(time.perf_counter() - t0, 2)
 
         result = {
@@ -451,13 +498,24 @@ def encode_frames(ctx: JobContext, prog: _Progress, plan, canvas: np.ndarray, ds
             proc.kill()
             proc.wait()
             if ctx.cancelled:
+                _remove_quietly(video_path, log_path)
                 raise JobCancelled()
             code = proc.returncode
         except BaseException:
             proc.kill()
             proc.wait()
+            _remove_quietly(video_path)
             raise
     tail = Path(log_path).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-8:]
     if code != 0:
+        _remove_quietly(video_path)  # never leave a truncated MP4 that looks like a result
         raise FFmpegError(f"FFmpeg failed while encoding the video (exit {code}): {' '.join(tail)}")
     os.remove(log_path)
+
+
+def _remove_quietly(*paths: str) -> None:
+    for path in paths:
+        try:
+            os.remove(path)
+        except OSError:
+            pass

@@ -248,14 +248,119 @@ class StudioServerTests(unittest.TestCase):
             self.assertEqual(client.get("/models", headers={"Authorization": "Bearer wrong"}).status_code, 401)
             self.assertEqual(client.get("/models", headers={"Authorization": "Bearer s3cret"}).status_code, 200)
             self.assertEqual(client.get("/models", headers={"X-GladTalker-Token": "s3cret"}).status_code, 200)
+            auth = {"Authorization": "Bearer s3cret"}
             with mock.patch.object(pipeline, "render", self._fake_render()):
-                job_id = client.post("/render/start", json=_render_body(self.image),
-                                     headers={"Authorization": "Bearer s3cret"}).json()["id"]
-            with self.assertRaises(WebSocketDisconnect):
-                with client.websocket_connect(f"/ws/jobs/{job_id}") as ws:
-                    ws.receive_json()
-            with client.websocket_connect(f"/ws/jobs/{job_id}?token=s3cret") as ws:
+                job_id = client.post("/render/start", json=_render_body(self.image), headers=auth).json()["id"]
+            # No ticket, or the long-lived token in the URL: both refused.
+            for query in ("", "?token=s3cret"):
+                with self.assertRaises(WebSocketDisconnect):
+                    with client.websocket_connect(f"/ws/jobs/{job_id}{query}") as ws:
+                        ws.receive_json()
+            self.assertEqual(client.post(f"/jobs/{job_id}/ws-ticket").status_code, 401)
+            ticket = client.post(f"/jobs/{job_id}/ws-ticket", headers=auth).json()
+            self.assertEqual(ticket["url"], f"/ws/jobs/{job_id}?ticket={ticket['ticket']}")
+            with client.websocket_connect(ticket["url"]) as ws:
                 self.assertEqual(ws.receive_json()["type"], "state")
+            # Tickets are single-use...
+            with self.assertRaises(WebSocketDisconnect):
+                with client.websocket_connect(ticket["url"]) as ws:
+                    ws.receive_json()
+            # ...and bound to one job.
+            other = client.post(f"/jobs/{job_id}/ws-ticket", headers=auth).json()["ticket"]
+            with self.assertRaises(WebSocketDisconnect):
+                with client.websocket_connect(f"/ws/jobs/someotherjob?ticket={other}") as ws:
+                    ws.receive_json()
+
+    def test_cross_origin_requests_rejected_before_side_effects(self):
+        evil = {"origin": "https://evil.example"}
+        with mock.patch.object(pipeline, "render", self._fake_render()) as _:
+            r = self.client.post("/render/start", json=_render_body(self.image), headers=evil)
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.client.get("/jobs").json()["jobs"], [], "no job may be created")
+        data = self.image.read_bytes()
+        r = self.client.post("/uploads", files={"file": ("scene.png", io.BytesIO(data), "image/png")}, headers=evil)
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse((self.tmp / "ws" / "uploads").exists(), "nothing may be written")
+        with mock.patch("src.studio.server.download_models") as dl:
+            self.assertEqual(self.client.post("/models/download", headers=evil).status_code, 403)
+            dl.assert_not_called()
+        # The Studio shell and same-origin pages are still allowed.
+        ok = self.client.post("/script/parse", json={"text": "A: hi"}, headers={"origin": "tauri://localhost"})
+        self.assertEqual(ok.status_code, 200)
+        same = self.client.post("/script/parse", json={"text": "A: hi"}, headers={"origin": "http://testserver"})
+        self.assertEqual(same.status_code, 200)
+
+    def test_upload_limits_enforced_before_parsing(self):
+        config = StudioConfig(workspace=self.tmp / "ws3", max_upload_mb=1, token="s3cret",
+                              allowed_hosts=DEFAULT_HOSTS + ["testserver"])
+        big = b"\x89PNG" + b"0" * (2 * 1024 * 1024)
+        with TestClient(create_app(config, self.services)) as client:
+            auth = {"Authorization": "Bearer s3cret"}
+            # Token is checked before the multipart body is read.
+            r = client.post("/uploads", files={"file": ("x.png", io.BytesIO(b"tiny"), "image/png")})
+            self.assertEqual(r.status_code, 401)
+            # Declared length over the limit is refused up front.
+            r = client.post("/uploads", files={"file": ("x.png", io.BytesIO(big), "image/png")}, headers=auth)
+            self.assertEqual(r.status_code, 413)
+
+            # A streamed (chunked, no Content-Length) body is cut off at the limit.
+            def chunks():  # well-formed multipart whose file part keeps streaming past the limit
+                yield (b'--xyz\r\nContent-Disposition: form-data; name="file"; filename="x.png"\r\n'
+                       b"Content-Type: image/png\r\n\r\n")
+                for _ in range(40):
+                    yield b"0" * (64 * 1024)
+                yield b"\r\n--xyz--\r\n"
+
+            r = client.post("/uploads", content=chunks(),
+                            headers={**auth, "content-type": "multipart/form-data; boundary=xyz"})
+            self.assertEqual(r.status_code, 413)
+            # JSON endpoints have a small limit too.
+            r = client.post("/script/parse", content=b'{"text": "' + b"a" * (3 * 1024 * 1024) + b'"}',
+                            headers={**auth, "content-type": "application/json"})
+            self.assertEqual(r.status_code, 413)
+        uploads = self.tmp / "ws3" / "uploads"
+        self.assertTrue(not uploads.exists() or not any(uploads.iterdir()))
+
+    def test_model_download_admission_is_atomic(self):
+        gate = threading.Event()
+
+        def slow_download(ctx, root, force=False):
+            gate.wait(5)
+            return {"downloaded": []}
+
+        ids, errors = [], []
+
+        def hit():
+            try:
+                ids.append(self.client.post("/models/download").json()["id"])
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with mock.patch("src.studio.server.download_models", slow_download):
+            threads = [threading.Thread(target=hit) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(5)
+            gate.set()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(ids), 8)
+        self.assertEqual(len(set(ids)), 1, "concurrent requests must share one download job")
+        self.assertEqual(len([j for j in self.jobs.list() if j.kind == "models.download"]), 1)
+
+    def test_idle_websocket_disconnect_releases_subscription(self):
+        gate = threading.Event()
+        job = self.jobs.submit("render", "Idle", lambda ctx: gate.wait(10))
+        try:
+            with self.client.websocket_connect(f"/ws/jobs/{job.id}") as ws:
+                ws.receive_json()  # history replay; the job then stays idle
+                self.assertEqual(len(self.jobs._subscribers.get(job.id, [])), 1)
+            deadline = time.time() + 3
+            while self.jobs._subscribers.get(job.id) and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(self.jobs._subscribers.get(job.id), [], "subscription must be released")
+        finally:
+            gate.set()
 
 
 if __name__ == "__main__":

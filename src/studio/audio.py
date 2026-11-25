@@ -1,6 +1,6 @@
 """Voices, pitch/tempo shifting, and frame-locked dialogue timelines.
 
-Generalizes the two-voice pipeline from ``results/RECREATE_GoogleMeet_PHM_42s.md`` to any number
+Generalizes the two-voice pipeline from the hand-written render script described in issue #11 to any number
 of cast members:
 
 1. Synthesize each line with coqui-tts (tacotron2-DDC).

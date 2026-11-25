@@ -10,7 +10,7 @@ from typing import Optional
 
 from src.studio import REPO_ROOT
 from src.studio.ffmpeg import ffmpeg_version, find_ffmpeg, find_ffprobe
-from src.studio.jobs import JobContext
+from src.studio.jobs import JobContext, UserFacingError
 
 
 class DeviceManager:
@@ -114,28 +114,38 @@ def model_manifest() -> list[tuple[str, str]]:
 
 
 def models_status(root: Path = REPO_ROOT) -> dict:
+    """Readiness of each model file. A file counts as ready only if it has its pinned size, so a
+    truncated download is reported (``incomplete``) and repaired by the next download job."""
+    from scripts.download_models import expected_for, is_complete
+
     files = []
     for rel, url in model_manifest():
         path = Path(root) / rel
-        part = path.with_suffix(path.suffix + ".part")
+        expected = expected_for(rel)
+        exists = path.is_file()
+        ready = is_complete(path, expected)
         files.append({
             "path": rel,
             "name": path.name,
             "url": url,
-            "exists": path.is_file(),
-            "size_bytes": path.stat().st_size if path.is_file() else None,
-            "partial": part.is_file(),
+            "exists": exists,
+            "ready": ready,
+            "incomplete": exists and not ready,
+            "size_bytes": path.stat().st_size if exists else None,
+            "expected_bytes": expected[0] if expected else None,
+            "partial": any(path.parent.glob(path.name + ".*part")) if path.parent.is_dir() else False,
         })
-    ready = sum(f["exists"] for f in files)
+    ready = sum(f["ready"] for f in files)
     return {"ready": ready, "total": len(files), "complete": ready == len(files), "files": files}
 
 
 def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False) -> dict:
     """Job body: fetch every missing model file, reporting per-file byte progress."""
-    from scripts.download_models import download_file
+    from scripts.download_models import DownloadIntegrityError, download_file, expected_for, is_complete
 
     manifest = model_manifest()
-    todo = [(rel, url) for rel, url in manifest if force or not (Path(root) / rel).is_file()]
+    todo = [(rel, url) for rel, url in manifest
+            if force or not is_complete(Path(root) / rel, expected_for(rel))]
     ctx.set_stages([Path(rel).name for rel, _ in todo] or ["check"])
     if not todo:
         ctx.progress(1.0, "All models are already downloaded.", stage="check")
@@ -158,7 +168,16 @@ def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False
                          stage=name, bytes_done=done, bytes_total=total)
 
         ctx.progress(i / len(todo), f"Downloading {name} ({i + 1} of {len(todo)})…", stage=name)
-        download_file(url, Path(root) / rel, force=force, progress=on_chunk)
+        try:
+            download_file(url, Path(root) / rel, force=force, progress=on_chunk, expected=expected_for(rel))
+        except DownloadIntegrityError as exc:
+            raise UserFacingError(str(exc)) from exc
+        except OSError as exc:  # URLError, timeouts, disk full...
+            reason = getattr(exc, "reason", None) or exc.strerror or exc
+            raise UserFacingError(
+                f"Couldn't download {name}: {reason}. Check your internet connection and free disk "
+                "space, then choose Download Models again."
+            ) from exc
         downloaded.append(rel)
         ctx.log(f"Downloaded {rel}")
 

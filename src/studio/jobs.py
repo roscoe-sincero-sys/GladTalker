@@ -141,15 +141,29 @@ class JobManager:
 
     # -- submission -------------------------------------------------------------------------
     def submit(self, kind: str, title: str, fn: JobFn, lane: str = "gpu") -> Job:
+        job, _ = self._submit(kind, title, fn, lane, unique=False)
+        return job
+
+    def submit_once(self, kind: str, title: str, fn: JobFn, lane: str = "gpu") -> tuple[Job, bool]:
+        """Submit unless a job of ``kind`` is already queued/running; returns (job, created).
+        The check and the registration happen under one lock, so concurrent callers can never
+        start two jobs of the same kind (e.g. two model downloads writing the same files)."""
+        return self._submit(kind, title, fn, lane, unique=True)
+
+    def _submit(self, kind: str, title: str, fn: JobFn, lane: str, unique: bool) -> tuple[Job, bool]:
         if lane not in self._lanes:
             raise KeyError(f"Unknown job lane '{lane}'")
-        job = Job(id=uuid.uuid4().hex[:12], kind=kind, title=title)
         with self._lock:
+            if unique:
+                for existing in self._jobs.values():
+                    if existing.kind == kind and not existing.done:
+                        return existing, False
+            job = Job(id=uuid.uuid4().hex[:12], kind=kind, title=title)
             self._jobs[job.id] = job
             self._prune()
         self._publish(job, "state")
         self._lanes[lane].submit(self._run, job, fn)
-        return job
+        return job, True
 
     def _run(self, job: Job, fn: JobFn) -> None:
         ctx = JobContext(self, job)

@@ -9,6 +9,7 @@ is bounded by long straight edges (video-call grids, comic panels), else a head-
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -208,6 +209,8 @@ class FaceDetectorService:
                 )
                 for det in net.detect_faces(img, min_confidence):
                     x1, y1, x2, y2, score = (float(v) for v in det[:5])
+                    if score < min_confidence:
+                        continue  # enforce the caller's floor regardless of any detector patching
                     found.append(FaceBox(
                         max(0.0, x1 / scale), max(0.0, y1 / scale),
                         min(float(width), x2 / scale), min(float(height), y2 / scale), score,
@@ -217,14 +220,12 @@ class FaceDetectorService:
 
 
 _fallback_lock = threading.Lock()
+_fallback_local = threading.local()
+FALLBACK_THRESHOLDS = (0.5, 0.2, 0.05)
 
 
-def install_retinaface_fallback(thresholds: Sequence[float] = (0.5, 0.2, 0.05)) -> None:
-    """Retry RetinaFace at lower confidence when nothing is found (stylized/illustrated faces).
-
-    SadTalker's preprocessing asks for 0.97 confidence, which drawn characters rarely reach. This
-    patch only changes behaviour when the strict pass finds no face at all. Idempotent.
-    """
+def _install_retinaface_fallback() -> None:
+    """Patch RetinaFace.detect_faces once; the patch is inert unless enabled on the calling thread."""
     from facexlib.detection.retinaface import RetinaFace
 
     with _fallback_lock:
@@ -234,10 +235,25 @@ def install_retinaface_fallback(thresholds: Sequence[float] = (0.5, 0.2, 0.05)) 
 
         def detect_faces_with_fallback(self, image, conf_threshold=0.8, *args, **kwargs):
             dets = original(self, image, conf_threshold, *args, **kwargs)
-            for thr in thresholds:
-                if len(dets) == 0 and conf_threshold > thr:
-                    dets = original(self, image, thr, *args, **kwargs)
+            if getattr(_fallback_local, "enabled", False):
+                for thr in FALLBACK_THRESHOLDS:
+                    if len(dets) == 0 and conf_threshold > thr:
+                        dets = original(self, image, thr, *args, **kwargs)
             return dets
 
         detect_faces_with_fallback._gladtalker_fallback = True
         RetinaFace.detect_faces = detect_faces_with_fallback
+
+
+@contextmanager
+def retinaface_fallback():
+    """Within this block (on this thread only), retry RetinaFace at lower confidence when the
+    strict pass finds no face. SadTalker's preprocessing asks for 0.97 confidence, which drawn and
+    stylized characters rarely reach. Auto-cast and other threads are unaffected."""
+    _install_retinaface_fallback()
+    previous = getattr(_fallback_local, "enabled", False)
+    _fallback_local.enabled = True
+    try:
+        yield
+    finally:
+        _fallback_local.enabled = previous

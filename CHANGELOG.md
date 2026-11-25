@@ -17,18 +17,32 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - `/cast/detect`: RetinaFace auto-cast tuned for stylized faces (permissive threshold + 2× pass), reading-order badges, and region suggestions that snap to video-call tiles / comic panels.
   - `/script/parse`: paste-a-script importer (`Name: line`, markdown/bullets, parentheticals, screenplay style, continuation lines) with pronunciation lint and one-click fixes; `/tts/preview` voice auditioning with semitone presets.
   - `/render/start`: generalizes the two-character recreate script to any cast. It supports natural pace or a target duration (≤2× tempo, with an actionable error if the script can't fit) and frame-locked per-speaker turns. Each character is rendered only while speaking. Output presets are 720p, 1080p, vertical, square and source, in fit or fill mode. Encoding is streamed H.264/AAC with `.srt`/`.vtt` captions.
-  - Background job queue (one GPU lane) with live WebSocket progress, measured ETA, rate-limited events, and Cancel that stops SadTalker mid-render.
-  - Localhost-only binding, Host/Origin checks, and an optional bearer token for the desktop sidecar.
-- `tests/`: `unittest` suite (67 tests) for the Studio engine: run `python -m unittest` from the repository root (inside your GladTalker venv)
+  - Background job queue (one GPU lane) with live WebSocket progress, measured ETA, rate-limited events, and Cancel that stops SadTalker mid-render and cleans up intermediate files.
+  - Security guard that runs before request bodies are parsed:
+    - Rejects foreign browser origins (403) before any side effect, and unexpected Host headers.
+    - Applies the optional bearer token to every route except `/health`.
+    - Enforces streamed request-size limits (413).
+    - The launcher refuses non-loopback binds without a token.
+  - WebSockets authenticate with single-use, job-scoped tickets (`POST /jobs/{id}/ws-ticket`), and `token=`/`ticket=` values are redacted from server logs.
+  - A memory-budget check refuses renders whose longest speaking part would not fit in RAM, with guidance on what to change.
+  - The sidecar prints its `listening` line only once uvicorn is accepting connections.
+- `scripts/download_models.py`: pinned size + SHA-256 for every model.
+  - Downloads use unique temp files and are verified (length and checksum) before replacing anything.
+  - Truncated files are reported as incomplete and repaired on the next run.
+- `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
+- `tests/`: `unittest` suite (100 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.
-- `scripts/download_models.py`: `download_file()` accepts a `progress` callback and uses a 60 s network timeout.
+- `scripts/download_models.py`: `download_file()` accepts a `progress` callback and an `expected=(size, sha256)` check, and uses a 60 s network timeout.
+- `src/utils/videoio.save_video_with_watermark()` runs FFmpeg with an argument list, honours `GLADTALKER_FFMPEG`, raises on failure instead of continuing silently, and writes its temp file beside the output instead of the working directory.
+- `src/utils/paste_pic.py` writes its temp video beside the output and always releases and removes it, even when interrupted.
 - TTS contraction normalization moved to `src/utils/tts_text.py` (re-exported from `text2speech.py`) so it can be used without loading coqui-tts.
 - `requirements.txt`: added `fastapi`, `uvicorn`, `python-multipart`, and `websockets` for the Studio engine.
 
 ### Fixed
 - DirectML device names no longer include a trailing NUL character in `describe_device()`.
+- Renders no longer fail when the image or workspace path contains non-ASCII characters on Windows (`preprocess.py` and `paste_pic.py` now use Unicode-safe image I/O).
 
 ---
 

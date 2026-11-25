@@ -12,6 +12,7 @@ With ``--port 0`` the chosen port is printed as a single JSON line on stdout
 """
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
@@ -22,6 +23,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+def is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 def parse_args(argv=None):
@@ -48,18 +58,25 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    import uvicorn
-
     from src.studio.server import DEFAULT_HOSTS, DEFAULT_ORIGINS, StudioConfig, create_app
 
     hosts = list(DEFAULT_HOSTS) + args.allow_host
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
+    if not is_loopback(args.host):
+        if not (args.token or "").strip():
+            print(f"Refusing to listen on {args.host} without a token: other computers could start renders "
+                  "and read files. Pass --token (or set GLADTALKER_STUDIO_TOKEN), or use --host 127.0.0.1.",
+                  file=sys.stderr)
+            return 2
         hosts.append(args.host)
-        logging.warning("Binding to %s exposes GladTalker Studio beyond this computer. Use --token.", args.host)
+        logging.warning("Binding to %s exposes GladTalker Studio beyond this computer; add the address "
+                        "clients will use with --allow-host.", args.host)
+
+    import uvicorn
+
     config = StudioConfig(
         device=args.device,
         workspace=args.workspace.resolve(),
-        token=args.token,
+        token=(args.token or "").strip() or None,
         allowed_origins=list(DEFAULT_ORIGINS) + args.allow_origin,
         allowed_hosts=hosts,
     )
@@ -70,12 +87,21 @@ def main(argv=None) -> int:
     sock.bind((args.host, args.port))
     port = sock.getsockname()[1]
     shown = f"[{args.host}]" if ":" in args.host else args.host
-    print(json.dumps({"event": "listening", "host": args.host, "port": port,
-                      "url": f"http://{shown}:{port}", "docs": f"http://{shown}:{port}/docs"}), flush=True)
+    ready_line = json.dumps({"event": "listening", "host": args.host, "port": port,
+                             "url": f"http://{shown}:{port}", "docs": f"http://{shown}:{port}/docs"})
 
-    server = uvicorn.Server(uvicorn.Config(app, log_level=args.log_level, ws="auto"))
+    class AnnouncingServer(uvicorn.Server):
+        """Prints the ready line only once uvicorn is accepting connections, so a parent process
+        can connect the moment it reads it."""
+
+        async def startup(self, sockets=None):
+            await super().startup(sockets=sockets)
+            if self.started and not self.should_exit:
+                print(ready_line, flush=True)
+
+    server = AnnouncingServer(uvicorn.Config(app, log_level=args.log_level, ws="auto"))
     server.run(sockets=[sock])
-    return 0
+    return 0 if server.started else 1
 
 
 if __name__ == "__main__":
