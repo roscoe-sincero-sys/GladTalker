@@ -45,7 +45,9 @@ The project saves itself in the browser as you work. **Save project** / **Open�
 3. the folder you chose in an earlier session;
 4. the folders around the app itself (for example, a development build inside the repository).
 
-Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that order. Set `GLADTALKER_PYTHON` to use a different interpreter. If no folder is found, or the engine fails to start, the app explains why, shows the engine's last messages (the full log is in the app's log folder), and offers **Choose GladTalker folder…** and **Try again**.
+Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that order. Set `GLADTALKER_PYTHON` to use a different interpreter. Relative paths in `GLADTALKER_HOME` and `GLADTALKER_PYTHON` are taken from the folder the app was started in.
+
+**Which GladTalker checkout works.** The folder must be at least as new as the desktop app (#11 phase 3): the app passes `studio_server.py` the `--exit-with-parent` option, which earlier checkouts (phase 2 and before) don't have. The app checks for it before starting the engine. With an older checkout, the setup screen names the folder and asks you to update it (for example `git pull`, then reinstall its requirements) or to choose a newer one; another, current checkout is used instead if one is found. If no folder is found, or the engine fails to start, the app explains why, shows the engine's last messages (the full log is in the app's log folder), and offers **Choose GladTalker folder…** and **Try again**.
 
 **What the app does:**
 - **Engine lifecycle:**
@@ -55,7 +57,7 @@ Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that o
   - In development builds (`npm run tauri:dev`), the engine also accepts the dev server's origin (`build.devUrl`). Release builds never do.
   - It stops the engine and everything it started when you close the app (Windows: the whole process tree; elsewhere: the engine's process group). The engine also watches the app's process (`--exit-with-parent`), so it stops even if the app crashes.
   - Start, restart, and changing the folder happen one at a time, so a restart during a slow first start replaces the engine instead of returning the old one.
-- **Saving:** **Save project** opens a native Save dialog. Saving is atomic: the file is written next to the old one and then replaces it, so a failed save never leaves a truncated project. Saving over a file keeps who may read it: on Windows the new contents go to a file nobody else can open (no sharing, owner-only from creation), which gets the old file's access list (DACL) before anything is written, and `ReplaceFileW` swaps it in; on macOS and Linux they get its permission bits and group. If the swap fails partway, the previous version is put back, or both versions are kept and the error message says where. **Open…** uses the system file picker.
+- **Saving:** **Save project** opens a native Save dialog. Saving is atomic: the file is written next to the old one and then replaces it, so a failed save never leaves a truncated project. Saving over a file keeps who may read it: on Windows the new contents go to a file nobody else can open (no sharing, owner-only from creation), which gets the old file's access list (DACL) before anything is written, and `ReplaceFileW` swaps it in; on macOS and Linux they get its permission bits and group. If the swap fails partway, the previous version is put back, but only if nothing else has saved under that name meanwhile; otherwise both versions are kept and the error message says where. Long paths work on Windows even with long-path support turned off. **Open…** uses the system file picker.
 - **Finished videos:** **Show the video in its folder** opens the file manager. It only works for files the engine wrote, inside its workspace.
 - **While rendering:**
   - Render progress appears on the taskbar icon.

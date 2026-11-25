@@ -82,7 +82,8 @@ fn ensure_started(app: &AppHandle, restart: bool, choose: Option<PathBuf>) -> St
         let home = std::env::var_os("GLADTALKER_HOME").map(PathBuf::from);
         let python = std::env::var_os("GLADTALKER_PYTHON").map(PathBuf::from);
         let candidates = engine::candidate_folders(chosen, home, saved, std::env::current_exe().ok());
-        let found = engine::locate(&candidates, python.as_deref())?;
+        let base = std::env::current_dir().unwrap_or_default();
+        let found = engine::locate(&candidates, python.as_deref(), &base)?;
         engine::start(&found, &log_file(app), &workspace_for(&found.folder), &dev_origins(app))
     })
 }
@@ -128,6 +129,13 @@ async fn choose_engine_folder(app: AppHandle) -> Result<Option<Status>, String> 
                     folder.display()
                 ),
                 folder: None,
+            });
+        }
+        if !engine::launcher_is_current(&folder) {
+            // Otherwise another, current checkout might quietly be used instead of the chosen one.
+            return Some(Status::NotFound {
+                message: engine::outdated_message(&folder),
+                folder: Some(folder.display().to_string()),
             });
         }
         let saved = config_file(&app)

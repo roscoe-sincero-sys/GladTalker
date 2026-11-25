@@ -61,6 +61,37 @@ pub fn is_engine_folder(folder: &Path) -> bool {
     folder.join("studio_server.py").is_file()
 }
 
+/// What the app needs from a GladTalker checkout's launcher, beyond what Phase 2 had: the engine
+/// must stop when the app does. Checkouts older than #11 phase 3 don't have it.
+pub const REQUIRED_LAUNCHER_OPTION: &str = "--exit-with-parent";
+
+/// Does this checkout's `studio_server.py` support what the app passes it?
+pub fn launcher_is_current(folder: &Path) -> bool {
+    fs::read_to_string(folder.join("studio_server.py")).is_ok_and(|text| text.contains(REQUIRED_LAUNCHER_OPTION))
+}
+
+pub fn outdated_message(folder: &Path) -> String {
+    format!(
+        "The GladTalker folder {} is older than this app: its studio_server.py doesn't support {}. \
+         Update that folder (for example with “git pull”, then reinstall its requirements), then choose \
+         Try again, or choose a newer GladTalker folder.",
+        folder.display(),
+        REQUIRED_LAUNCHER_OPTION
+    )
+}
+
+/// `path` as a full path: relative ones are taken from `base` (the app's working directory), so
+/// the engine, which runs in its own folder, gets the same folder the app means. `.` parts are
+/// dropped. A drive-relative `C:x` is resolved the way Windows does for this app.
+pub fn absolutize(path: &Path, base: &Path) -> PathBuf {
+    let joined: PathBuf = base.join(path).components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect();
+    if joined.is_absolute() {
+        joined
+    } else {
+        std::path::absolute(&joined).unwrap_or(joined)
+    }
+}
+
 /// The Python interpreter inside a GladTalker folder's virtual environment.
 pub fn find_python(folder: &Path, override_python: Option<&Path>) -> Option<PathBuf> {
     if let Some(p) = override_python {
@@ -94,14 +125,30 @@ pub fn candidate_folders(
     out
 }
 
-/// The first candidate that is a GladTalker folder with a Python environment.
-pub fn locate(candidates: &[PathBuf], override_python: Option<&Path>) -> Result<Located, Status> {
-    let mut folder_without_python: Option<&PathBuf> = None;
-    for folder in candidates.iter().filter(|f| is_engine_folder(f)) {
-        if let Some(python) = find_python(folder, override_python) {
-            return Ok(Located { folder: folder.clone(), python });
+/// The first candidate that is a current GladTalker folder with a Python environment, as full
+/// paths (relative candidates and a relative `override_python` are taken from `base`). If none
+/// is usable, the first problem found is explained.
+pub fn locate(candidates: &[PathBuf], override_python: Option<&Path>, base: &Path) -> Result<Located, Status> {
+    let override_python = override_python.map(|p| absolutize(p, base));
+    let mut folder_without_python: Option<PathBuf> = None;
+    let mut outdated: Option<PathBuf> = None;
+    for folder in candidates.iter().map(|f| absolutize(f, base)).filter(|f| is_engine_folder(f)) {
+        let Some(python) = find_python(&folder, override_python.as_deref()) else {
+            if outdated.is_none() {
+                folder_without_python.get_or_insert(folder);
+            }
+            continue;
+        };
+        if !launcher_is_current(&folder) {
+            if folder_without_python.is_none() {
+                outdated.get_or_insert(folder);
+            }
+            continue;
         }
-        folder_without_python.get_or_insert(folder);
+        return Ok(Located { folder, python });
+    }
+    if let Some(folder) = outdated {
+        return Err(Status::NotFound { message: outdated_message(&folder), folder: Some(folder.display().to_string()) });
     }
     Err(match folder_without_python {
         Some(folder) => Status::NotFound {
@@ -330,7 +377,12 @@ pub fn start(found: &Located, log_path: &Path, workspace: &Path, extra_origins: 
         }
         if let Ok(Some(code)) = child.try_wait() {
             thread::sleep(Duration::from_millis(200)); // let the readers catch the last lines
-            return Err(failed(format!("The engine stopped while starting ({code})."), log.text()));
+            let text = log.text();
+            // An older launcher that slipped past launcher_is_current: argparse rejects the option.
+            if text.contains("unrecognized arguments") && text.contains(REQUIRED_LAUNCHER_OPTION) {
+                return Err(failed(outdated_message(&found.folder), text));
+            }
+            return Err(failed(format!("The engine stopped while starting ({code})."), text));
         }
         if std::time::Instant::now() > deadline {
             stop(&mut child);
@@ -391,7 +443,7 @@ mod tests {
 
     fn engine_folder(root: &Path, venv: Option<&str>) -> PathBuf {
         fs::create_dir_all(root).unwrap();
-        fs::write(root.join("studio_server.py"), "").unwrap();
+        fs::write(root.join("studio_server.py"), format!("# accepts {REQUIRED_LAUNCHER_OPTION}\n")).unwrap();
         if let Some(name) = venv {
             let py = venv_python(&root.join(name));
             fs::create_dir_all(py.parent().unwrap()).unwrap();
@@ -429,20 +481,64 @@ mod tests {
         let not_engine = tmp.path().join("c");
         fs::create_dir_all(&not_engine).unwrap();
 
-        let found = locate(&[not_engine.clone(), no_python.clone(), usable.clone()], None).unwrap();
+        let found = locate(&[not_engine.clone(), no_python.clone(), usable.clone()], None, tmp.path()).unwrap();
         assert_eq!(found.folder, usable);
 
-        match locate(&[not_engine.clone(), no_python.clone()], None) {
+        match locate(&[not_engine.clone(), no_python.clone()], None, tmp.path()) {
             Err(Status::NotFound { message, folder }) => {
                 assert!(message.contains("Python environment isn't set up"), "{message}");
                 assert_eq!(folder, Some(no_python.display().to_string()));
             }
             other => panic!("{other:?}"),
         }
-        match locate(&[not_engine], None) {
+        match locate(&[not_engine], None, tmp.path()) {
             Err(Status::NotFound { folder: None, message }) => assert!(message.contains("Choose where it is")),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn an_older_checkout_is_skipped_for_a_current_one_or_explained_with_how_to_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A Phase 2 checkout: its launcher has no --exit-with-parent, which this app always passes.
+        let old = engine_folder(&tmp.path().join("old"), Some("venv"));
+        fs::write(old.join("studio_server.py"), "p.add_argument('--open')\n").unwrap();
+        let current = engine_folder(&tmp.path().join("current"), Some("venv"));
+        assert!(!launcher_is_current(&old));
+        assert!(launcher_is_current(&current));
+
+        assert_eq!(locate(&[old.clone(), current.clone()], None, tmp.path()).unwrap().folder, current);
+        match locate(std::slice::from_ref(&old), None, tmp.path()) {
+            Err(Status::NotFound { message, folder }) => {
+                assert!(message.contains("older than this app") && message.contains("git pull"), "{message}");
+                assert!(message.contains("--exit-with-parent"), "{message}");
+                assert_eq!(folder, Some(old.display().to_string())); // the setup screen shows which folder
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_relative_home_folder_becomes_a_full_path_with_a_full_default_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = engine_folder(&tmp.path().join("gt"), Some("venv"));
+        // GLADTALKER_HOME=. started from the checkout, and GLADTALKER_HOME=gt from its parent.
+        for (home, base) in [(".", folder.clone()), ("gt", tmp.path().to_path_buf())] {
+            let found = locate(&[PathBuf::from(home)], None, &base).unwrap();
+            assert_eq!(found.folder, folder);
+            assert!(found.python.is_absolute());
+            let workspace = resolve_workspace(None, &base, &found.folder);
+            assert_eq!(workspace, folder.join("results").join("studio"));
+            // start accepts it (and only then fails, on the fake Python).
+            match start(&found, &tmp.path().join("engine.log"), &workspace, &[]) {
+                Err(Status::Failed { message, .. }) => assert!(!message.contains("must be a full path"), "{message}"),
+                Err(other) => panic!("{other:?}"),
+                Ok(_) => panic!("the fake Python can't start"),
+            }
+        }
+        // A relative GLADTALKER_PYTHON is taken from the same base.
+        let py = venv_python(Path::new("gt").join("venv").as_path());
+        assert_eq!(locate(std::slice::from_ref(&folder), Some(&py), tmp.path()).unwrap().python, venv_python(&folder.join("venv")));
     }
 
     #[test]

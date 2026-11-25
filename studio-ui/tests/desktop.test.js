@@ -94,6 +94,26 @@ describe('starting the engine from the desktop app', () => {
     expect(host.invoke).toHaveBeenLastCalledWith('restart_engine', {});
   });
 
+  it('tells the user how to update an older GladTalker checkout, and retries once they have', async () => {
+    // What the shell reports for a Phase 2 checkout (engine::outdated_message).
+    const message = 'The GladTalker folder C:/gt-old is older than this app: its studio_server.py doesn’t support '
+      + '--exit-with-parent. Update that folder (for example with “git pull”, then reinstall its requirements), then '
+      + 'choose Try again, or choose a newer GladTalker folder.';
+    shell({ start_engine: { state: 'not_found', message, folder: 'C:/gt-old' }, restart_engine: READY });
+    engineFetch();
+    await connectEngine();
+    expect(engine.status).toBe('setup');
+    const { container, unmount } = render(EngineSetup);
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Choose GladTalker folder…' })).toBeTruthy();
+    expect(await violations(container)).toEqual([]);
+    // The user updated the checkout: Try again starts it.
+    await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await vi.waitFor(() => expect(engine.status).toBe('ready'));
+    expect(host.invoke).toHaveBeenLastCalledWith('restart_engine', {});
+    unmount();
+  });
+
   it('passes on a note from the shell (say, the chosen folder couldn’t be remembered)', async () => {
     shell({ start_engine: { ...READY, note: 'GladTalker Studio couldn’t remember this folder for next time (denied).' } });
     engineFetch();

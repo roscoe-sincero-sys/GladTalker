@@ -14,9 +14,15 @@
 //!
 //! A new file gets the folder's defaults, as any newly created file does.
 //!
-//! If the replacement fails partway (ReplaceFileW documents states where the original has been
-//! moved aside, or is gone), [`recover`] looks at what is actually on disk: it puts the previous
-//! version back under its name when it can, and otherwise keeps both files and says where they are.
+//! If the replacement fails partway (ReplaceFileW documents a state where the original has been
+//! moved to the backup name), [`recover`] looks at what is actually on disk. It puts the previous
+//! version back only into a free name (never over a file someone else saved meanwhile), deletes
+//! the staging file only once that has worked or nothing was moved, and otherwise keeps both
+//! files and says where they are.
+//!
+//! On Windows every path handed to the Win32 calls is a full extended-length path (`\\?\C:\…`,
+//! `\\?\UNC\…`), so a project in a deeply nested folder saves even with long paths disabled; the
+//! staging and backup names are short and don't grow with the project's name.
 
 use std::fmt;
 use std::fs;
@@ -88,56 +94,72 @@ fn write_with_replacer(
             }
             Ok(())
         }
-        Err(source) => Err(recover(source, &tmp, path, backup.as_deref())),
+        Err(source) => Err(recover(source, &tmp, path, backup.as_deref(), existing)),
     }
 }
 
 /// After a failed swap, works out from the files themselves what is left. The previous version
-/// is put back under its name if it was moved aside; a file is deleted only when another complete
-/// copy of the same version is in place.
-fn recover(source: io::Error, tmp: &Path, path: &Path, backup: Option<&Path>) -> SaveError {
+/// is put back under its name only if that name is free (a no-replace move), so a save that
+/// landed meanwhile from another window or program is never undone. The staging file is deleted
+/// only when the previous version is in place again or was never moved; otherwise both files are
+/// kept and named.
+fn recover(source: io::Error, tmp: &Path, path: &Path, backup: Option<&Path>, existed: bool) -> SaveError {
     let is_file = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
-    let backup = backup.filter(|b| is_file(b));
-    if !is_file(path) {
-        if let Some(b) = backup {
-            let _ = fs::rename(b, path); // put the previous version back under its name
-        }
-    }
-    let backup = backup.filter(|b| is_file(b)); // gone if it was just put back
-    let in_place = is_file(path);
     let staged = is_file(tmp);
-
-    let recovery = match (in_place, staged) {
-        // The new contents were never swapped in, so what is in place is the previous version.
-        (true, true) => {
+    let moved_aside = backup.filter(|b| is_file(b));
+    let recovery = match (moved_aside, staged) {
+        // Nothing was moved and the new contents weren't swapped in: what is at `path` (the
+        // previous version, or someone else's newer save) isn't ours to touch.
+        (None, true) if !existed || is_file(path) => {
             let _ = fs::remove_file(tmp);
-            backup.map(|b| format!("The previous file is unchanged; an extra copy of it was left at {}", b.display()))
+            None
         }
-        // The new contents did get swapped in.
-        (true, false) => Some(match backup {
-            Some(b) => format!("The new project was saved, and the previous version was kept at {}", b.display()),
-            None => "The new project was saved".into(),
-        }),
-        // Nothing is in place: keep everything there is, and say where it is.
-        (false, _) => {
-            let new = if staged { format!("The new project is at {}", tmp.display()) } else { "The new project couldn't be kept".into() };
-            let old = match backup {
-                Some(b) => format!("the previous version is at {}", b.display()),
-                None => "the previous version is no longer there".into(),
-            };
-            Some(format!("{} couldn't be put in place. {new}, and {old}", path.display()))
-        }
+        (None, true) => Some(format!(
+            "{} is no longer there. The new project is at {}",
+            path.display(),
+            tmp.display()
+        )),
+        // The previous version was moved aside: put it back, but only into a free name.
+        (Some(b), true) => match platform::restore(b, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(tmp);
+                None
+            }
+            Err(_) if is_file(path) => Some(format!(
+                "{} was saved by something else meanwhile, so it was left as it is. Your new project is at {}, \
+                 and the previous version is at {}",
+                path.display(),
+                tmp.display(),
+                b.display()
+            )),
+            Err(e) => Some(format!(
+                "The previous version couldn't be put back ({e}). Your new project is at {}, and the previous \
+                 version is at {}",
+                tmp.display(),
+                b.display()
+            )),
+        },
+        // The staging file is gone: it was moved, presumably into place. Keep what remains.
+        (Some(b), false) => Some(format!(
+            "The new project may have been saved as {}; the previous version was kept at {}",
+            path.display(),
+            b.display()
+        )),
+        (None, false) => Some(format!(
+            "The new project may have been saved as {}; check that it is the version you expect",
+            path.display()
+        )),
     };
     SaveError { source, recovery }
 }
 
-/// A unique name next to `path`, e.g. `.scene.gladtalker.json.1234-…-0.tmp`.
+/// A unique, short name next to `path`, e.g. `.gladtalker-1a2b-5f3e9c1d0.tmp`. It doesn't include
+/// the project's name, so it never pushes a long name past a path or name length limit.
 fn sibling(path: &Path, kind: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    path.with_file_name(format!(".{name}.{}-{nanos}-{n}.{kind}", std::process::id()))
+    path.with_file_name(format!(".gladtalker-{:x}-{nanos:x}{n:x}.{kind}", std::process::id()))
 }
 
 #[cfg(windows)]
@@ -159,15 +181,31 @@ mod platform {
         PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, UNPROTECTED_DACL_SECURITY_INFORMATION,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, ReplaceFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_NONE, READ_CONTROL, WRITE_DAC,
+        CreateFileW, MoveFileExW, ReplaceFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_NONE, READ_CONTROL,
+        WRITE_DAC,
     };
 
     /// Owner only, nothing inherited from the folder: the staging file's DACL from the moment it
     /// exists, until the destination's own DACL replaces it.
     pub(super) const OWNER_ONLY: &str = "D:P(A;;FA;;;OW)";
 
+    /// `path` for a Win32 call: full, NUL-terminated, and extended-length (`\\?\C:\…` or
+    /// `\\?\UNC\server\share\…`), so it isn't limited to MAX_PATH when long paths are off.
     pub(super) fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
+        let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let units: Vec<u16> = full.as_os_str().encode_wide().collect();
+        let utf16 = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let mut out = if units.starts_with(&utf16(r"\\?\")) || units.starts_with(&utf16(r"\\.\")) {
+            units // already extended-length, or a device path
+        } else if units.starts_with(&utf16(r"\\")) {
+            [utf16(r"\\?\UNC\"), units[2..].to_vec()].concat()
+        } else if units.len() >= 3 && units[1] == u16::from(b':') && units[2] == u16::from(b'\\') {
+            [utf16(r"\\?\"), units].concat()
+        } else {
+            units
+        };
+        out.push(0);
+        out
     }
 
     /// Creates the staging file with no sharing, so no other handle can open it while this one
@@ -254,6 +292,16 @@ mod platform {
         result
     }
 
+    /// Moves the previous version back to `path`, only if nothing is there (no MOVEFILE_REPLACE_EXISTING).
+    pub(super) fn restore(backup: &Path, path: &Path) -> io::Result<()> {
+        // SAFETY: valid NUL-terminated paths.
+        if unsafe { MoveFileExW(wide(backup).as_ptr(), wide(path).as_ptr(), 0) } != 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     /// Puts `tmp` in `path`'s place. An existing file is replaced with ReplaceFileW (keeping its
     /// DACL, attributes, and creation time), moving it aside to `backup` on the way, so a partial
     /// failure always leaves it somewhere `recover` can find it. A new file is simply renamed.
@@ -306,6 +354,13 @@ mod platform {
             }
         }
         Ok(file)
+    }
+
+    /// Moves the previous version back to `path`, only if nothing is there: link(2) refuses an
+    /// existing name, unlike rename(2).
+    pub(super) fn restore(backup: &Path, path: &Path) -> io::Result<()> {
+        fs::hard_link(backup, path)?;
+        fs::remove_file(backup)
     }
 
     /// rename(2) replaces the destination atomically: it is never missing, so no backup is needed.
@@ -415,9 +470,31 @@ mod tests {
         }
 
         #[test]
-        fn original_gone_1176_without_a_backup_keeps_the_new_contents() {
-            // ERROR_UNABLE_TO_MOVE_REPLACEMENT without a backup name: the original is gone and
-            // the replacement still has its temporary name. It must not be deleted.
+        fn a_competing_save_that_lands_meanwhile_is_never_undone() {
+            // 1177: the original was moved to the backup name, and before recovery another
+            // window or editor saves its own version under the project's name.
+            let (dir, path) = setup();
+            let err = write_with_replacer(&path, new_contents, |_, path, backup| {
+                fs::rename(path, backup.unwrap())?;
+                fs::write(path, b"someone else's save")?;
+                Err(io::Error::other("unable to move replacement (1177)"))
+            })
+            .unwrap_err();
+            assert_eq!(fs::read(&path).unwrap(), b"someone else's save", "the competing save stays");
+            let new = with_contents(dir.path(), b"new version");
+            let old = with_contents(dir.path(), b"previous version");
+            assert_eq!((new.len(), old.len()), (1, 1), "a complete copy of each version survives");
+            let message = err.to_string();
+            assert!(!message.contains("unchanged"), "{message}");
+            assert!(message.contains("saved by something else meanwhile"), "{message}");
+            assert!(message.contains(&dir.path().join(&new[0]).display().to_string()), "{message}");
+            assert!(message.contains(&dir.path().join(&old[0]).display().to_string()), "{message}");
+        }
+
+        #[test]
+        fn an_original_that_vanished_meanwhile_keeps_the_new_contents() {
+            // Not a ReplaceFileW state with a backup name, but the file can be deleted by
+            // something else: then the staging file is the only copy and must not be deleted.
             let (dir, path) = setup();
             let err = write_with_replacer(&path, new_contents, |_, path, _| {
                 fs::remove_file(path)?;
@@ -430,18 +507,32 @@ mod tests {
         }
 
         #[test]
-        fn swapped_in_but_reported_as_failed_says_so() {
+        fn could_not_remove_replaced_1175_leaves_both_names() {
+            // ERROR_UNABLE_TO_REMOVE_REPLACED: "the replaced and replacement files retain their
+            // original file names".
+            let (dir, path) = setup();
+            let err = write_with_replacer(&path, new_contents, |_, _, _| {
+                Err(io::Error::other("unable to remove replaced (1175)"))
+            })
+            .unwrap_err();
+            assert!(err.recovery.is_none(), "{err}");
+            assert_eq!(fs::read(&path).unwrap(), b"previous version");
+            assert_eq!(names(dir.path()), ["scene.gladtalker.json"]);
+        }
+
+        #[test]
+        fn a_swap_that_happened_despite_the_error_keeps_the_backup_and_says_so() {
+            // Not a documented outcome, but if the staging file is gone, nothing is deleted.
             let (dir, path) = setup();
             let err = write_with_replacer(&path, new_contents, |tmp, path, backup| {
                 fs::rename(path, backup.unwrap())?;
                 fs::rename(tmp, path)?;
-                Err(io::Error::other("unable to remove replaced (1175)"))
+                Err(io::Error::other("reported failure"))
             })
             .unwrap_err();
             assert_eq!(fs::read(&path).unwrap(), b"new version");
-            let old = with_contents(dir.path(), b"previous version");
-            assert_eq!(old.len(), 1);
-            assert!(err.to_string().contains("The new project was saved"), "{err}");
+            assert_eq!(with_contents(dir.path(), b"previous version").len(), 1);
+            assert!(err.to_string().contains("may have been saved"), "{err}");
         }
     }
 
@@ -502,6 +593,42 @@ mod tests {
 
         fn sharing_violation(path: &Path) -> bool {
             fs::File::open(path).err().and_then(|e| e.raw_os_error()) == Some(ERROR_SHARING_VIOLATION as i32)
+        }
+
+        #[test]
+        fn saves_in_folders_deeper_than_max_path() {
+            // With long paths disabled (the Windows default), a raw path over 260 characters
+            // fails in CreateFileW; the extended-length form doesn't.
+            let tmp = tempfile::tempdir().unwrap();
+            let mut dir = tmp.path().to_path_buf();
+            while dir.as_os_str().len() < 250 {
+                dir.push("a-nested-project-folder");
+            }
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("my long-named scene.gladtalker.json");
+            assert!(path.as_os_str().len() > 260, "{}", path.as_os_str().len());
+
+            write_atomically(&path, b"v1").unwrap(); // create
+            restrict_to_owner(&path);
+            let restricted = dacl_sddl(&path);
+            write_atomically_with(&path, |f, staging| {
+                assert!(staging.as_os_str().len() > 260);
+                assert_eq!(dacl_sddl(staging), restricted);
+                f.write_all(b"v2")
+            })
+            .unwrap(); // overwrite: ACL copy, ReplaceFileW with a backup
+            assert_eq!(fs::read(&path).unwrap(), b"v2");
+            assert_eq!(dacl_sddl(&path), restricted);
+            assert_eq!(names(&dir), ["my long-named scene.gladtalker.json"]);
+        }
+
+        #[test]
+        fn extended_length_paths_for_drive_and_unc_paths() {
+            let text = |p: &str| String::from_utf16(&wide(Path::new(p))[..]).unwrap().trim_end_matches('\0').to_string();
+            assert_eq!(text(r"C:\Projects\a.json"), r"\\?\C:\Projects\a.json");
+            assert_eq!(text(r"C:/Projects/./x/../a.json"), r"\\?\C:\Projects\a.json");
+            assert_eq!(text(r"\\server\share\a.json"), r"\\?\UNC\server\share\a.json");
+            assert_eq!(text(r"\\?\C:\already.json"), r"\\?\C:\already.json");
         }
 
         #[test]

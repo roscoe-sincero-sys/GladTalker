@@ -5,7 +5,7 @@ description = "GladTalker Studio desktop app: the Cast → Script → Roll UI wi
 authors = ["GladTalker contributors"]
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.79"
 
 [lib]
 name = "gladtalker_studio_lib"
