@@ -11,8 +11,14 @@
 ```bash
 python studio_server.py                       # UI at http://127.0.0.1:7860, API docs at /docs
 python studio_server.py --device dml:0        # auto | cpu | cuda[:N] | dml[:N] | mps
-python studio_server.py --port 0 --token XYZ  # sidecar mode: free port + bearer token
+python studio_server.py --open                # web mode: also open the UI in your browser
+                                              # (not with a token: it prints how to open it)
+python studio_server.py --port 0 --token XYZ --exit-with-parent PID
+                                              # sidecar mode (the desktop app): free port,
+                                              # bearer token, stops when process PID ends
 ```
+
+`--exit-with-parent PID` makes the engine shut down when that process ends, even if it crashes or is killed. The engine first shuts down gracefully, and exits outright 15 seconds later. On Windows, a venv's `python.exe` is a launcher that starts the real interpreter as its own child, so stopping the launcher alone could leave the engine running. Watching the app's PID covers that case.
 
 When `studio-ui/dist/` is present (it is committed), the engine also serves the Studio UI at `/`, with a strict Content-Security-Policy. API routes always take precedence. See [`studio-ui/README.md`](../studio-ui/README.md).
 

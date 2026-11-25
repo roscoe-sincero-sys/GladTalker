@@ -1,6 +1,6 @@
 <script>
   import { onDestroy, tick, untrack } from 'svelte';
-  import { api, revokeMedia } from '../lib/api.js';
+  import { api, revokeMedia, whenNews } from '../lib/api.js';
   import { project, newId, nextStyleIndex, audioPreviewRequest, projectGuard, previewDigest,
     MAX_CAST, MAX_LINES, MAX_LINE_CHARS } from '../lib/project.svelte.js';
   import { submitting, submitPreview } from '../lib/jobs.svelte.js';
@@ -222,18 +222,17 @@
     if (!id) return;
     previewError = '';
     const mine = () => previewAttachedId === id && !destroyed;
-    let live = false;
+    const wasRunning = api.jobWasRunning(id); // its end is news only if it hadn't ended yet
     previewWatch = api.watchJob(id, (j) => {
-      if (!mine()) return;
-      if (j.state === 'queued' || j.state === 'running') live = true;
-      if (j.state !== 'succeeded') previewJob = j;
+      if (mine() && j.state !== 'succeeded') previewJob = j;
     });
     previewWatch.done.then(
       async (final) => {
         if (!mine() || !final) return;
+        // The result is shown at once; only the announcement waits for the lookup.
         if (final.state !== 'succeeded') {
           previewJob = final;
-          if (final.state === 'failed' && live) announceError(final.error || 'The audio preview failed.');
+          if (final.state === 'failed') whenNews(wasRunning, mine, () => announceError(final.error || 'The audio preview failed.'));
           return;
         }
         previewLoading = true;
@@ -242,7 +241,7 @@
           if (!mine()) return revokeMedia(url);
           previewJob = final;
           setPreviewUrl(url);
-          if (live) announce(`Audio mix ready: ${duration(final.result.duration_s)} at ${pacingLabel(final.result.tempo)}. Use the player to listen.`);
+          whenNews(wasRunning, mine, () => announce(`Audio mix ready: ${duration(final.result.duration_s)} at ${pacingLabel(final.result.tempo)}. Use the player to listen.`));
         } catch (err) {
           if (!mine()) return;
           previewJob = null;

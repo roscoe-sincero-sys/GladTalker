@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -195,9 +197,9 @@ class MemoryBudgetTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
-    def _launch(self, *args):
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-        env.pop("GLADTALKER_STUDIO_TOKEN", None)
+    def _launch(self, *args, env=None):
+        inherited = {k: v for k, v in os.environ.items() if k != "GLADTALKER_STUDIO_TOKEN"}
+        env = {**inherited, "PYTHONIOENCODING": "utf-8", **(env or {})}  # a test's own token is kept
         return subprocess.Popen([sys.executable, str(REPO_ROOT / "studio_server.py"), *args],
                                 cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, env=env)
@@ -208,6 +210,99 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("without a token", err)
         self.assertEqual(out, "")
+
+    def test_exits_when_the_parent_process_ends(self):
+        """--exit-with-parent: the desktop app crashing (or being killed) must not leave the
+        engine running in the background."""
+        parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        proc = self._launch("--port", "0", "--log-level", "warning", "--exit-with-parent", str(parent.pid))
+        try:
+            self.assertEqual(json.loads(proc.stdout.readline())["event"], "listening")
+            time.sleep(1)
+            self.assertIsNone(proc.poll(), "the engine runs while its parent does")
+            parent.kill()
+            parent.wait(timeout=30)
+            self.assertEqual(proc.wait(timeout=30), 0)
+        finally:
+            parent.kill()
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=30)
+
+    def test_open_flag_opens_the_ui_and_never_fails_the_engine(self):
+        import studio_server
+        from unittest import mock
+
+        self.assertTrue(studio_server.parse_args(["--open"]).open)
+        self.assertFalse(studio_server.parse_args([]).open)
+        with mock.patch("webbrowser.open") as opened:
+            studio_server.open_in_browser("http://localhost:7860/")
+        opened.assert_called_once_with("http://localhost:7860/")
+        with mock.patch("webbrowser.open", side_effect=RuntimeError("no browser")),                 self.assertLogs(level="WARNING") as logs:
+            studio_server.open_in_browser("http://localhost:7860/")  # logs, doesn't raise
+        self.assertIn("Open http://localhost:7860/ yourself", logs.output[0])
+
+    def test_wait_for_exit_returns_for_a_missing_process(self):
+        from src.studio.parent_watch import wait_for_exit
+
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait(timeout=30)
+        self.assertTrue(wait_for_exit(gone.pid, poll_s=0.05))
+
+    def _fake_browser(self):
+        """A stand-in browser (via BROWSER) that records the URL it is asked to open."""
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp(prefix="gladtalker_open_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        record = tmp / "opened.txt"
+        fake_browser = tmp / "fake_browser.py"
+        # Written to a temporary name, then renamed: the test never reads a half-written file.
+        fake_browser.write_text("import os, sys, pathlib\n"
+                                f"tmp = pathlib.Path({str(record) + '.tmp'!r})\n"
+                                "tmp.write_text(sys.argv[1])\n"
+                                f"os.replace(tmp, {str(record)!r})\n", encoding="utf-8")
+        return {"BROWSER": f'"{sys.executable}" "{fake_browser}" %s'}, record
+
+    def test_open_with_a_token_opens_nothing_and_says_how_to_open_it(self):
+        """A fresh browser tab has no token, so it would only show a disconnected page. The token
+        must not go into a URL handed to another program either, so --open explains instead."""
+        env, record = self._fake_browser()
+        proc = self._launch("--port", "0", "--open", "--log-level", "warning",
+                            env={**env, "GLADTALKER_STUDIO_TOKEN": "s3cret-token"})
+        try:
+            event = json.loads(proc.stdout.readline())
+            self.assertNotIn("s3cret-token", json.dumps(event))
+            time.sleep(2)  # time for a browser to have been started, if one were
+        finally:
+            proc.terminate()
+            _, err = proc.communicate(timeout=30)
+        self.assertFalse(record.exists(), "no browser is opened for a token-protected engine")
+        self.assertIn(f"Open {event['url']}/#token=<your token> yourself", err)
+        self.assertNotIn("s3cret-token", err)
+
+    def test_open_flag_opens_the_announced_address(self):
+        """--open opens the same origin as the ready line (and the docs), once the engine is
+        ready: not "localhost", which is another browser origin with its own saved project, and
+        may resolve to ::1, which isn't bound."""
+        env, record = self._fake_browser()
+        proc = self._launch("--port", "0", "--open", "--log-level", "warning", env=env)
+        try:
+            event = json.loads(proc.stdout.readline())
+            deadline = time.time() + 30
+            opened = ""
+            while not opened and time.time() < deadline:
+                try:
+                    opened = record.read_text()
+                except (FileNotFoundError, PermissionError):  # not there yet / briefly locked (AV scan)
+                    pass
+                if not opened:
+                    time.sleep(0.1)
+            self.assertEqual(opened, f"{event['url']}/")
+            self.assertTrue(event["url"].startswith("http://127.0.0.1:"))
+        finally:
+            proc.terminate()
+            proc.communicate(timeout=30)
 
     def test_ready_line_means_reachable(self):
         proc = self._launch("--port", "0", "--log-level", "warning")

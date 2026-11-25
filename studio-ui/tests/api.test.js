@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createApi, readEngineToken, ApiError, basename, revokeMedia, isJobId } from '../src/lib/api.js';
+import { createApi, readEngineToken, ApiError, basename, revokeMedia, isJobId, whenNews } from '../src/lib/api.js';
 
 const json = (status, body) => ({ ok: status < 400, status, json: async () => body, blob: async () => new Blob(['x']) });
 
@@ -69,6 +69,87 @@ describe('job ids', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(isJobId('0123456789ab')).toBe(true);
     expect(api.plainFileUrl('0123456789ab', 'srt')).toBe('/jobs/0123456789ab/files/srt');
+  });
+});
+
+describe('jobWasRunning', () => {
+  it('reports whether the job was still queued or running, and never throws', async () => {
+    const states = { '00000000000a': 'running', '00000000000b': 'queued', '00000000000c': 'succeeded' };
+    const fetchImpl = vi.fn(async (url) => {
+      const id = url.split('/').pop();
+      return states[id] ? json(200, { id, state: states[id] }) : json(404, { detail: 'gone' });
+    });
+    const api = createApi({ fetchImpl });
+    expect(await api.jobWasRunning('00000000000a')).toBe(true);
+    expect(await api.jobWasRunning('00000000000b')).toBe(true);
+    expect(await api.jobWasRunning('00000000000c')).toBe(false);
+    expect(await api.jobWasRunning('00000000000d')).toBe(false); // 404
+    expect(await api.jobWasRunning('../x')).toBe(false); // not even requested
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+  it('gives up after a bounded wait, counting the job as not news, and cancels the request', async () => {
+    vi.useFakeTimers();
+    try {
+      // The engine never answers; the transport only settles when the request is aborted.
+      const pending = [];
+      const fetchImpl = vi.fn((url, init) => new Promise((resolve, reject) => {
+        pending.push(init.signal);
+        init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      }));
+      const api = createApi({ fetchImpl });
+      const answers = ['00000000000a', '00000000000b', '00000000000c'].map((id) => {
+        const box = {};
+        api.jobWasRunning(id, { timeoutMs: 5000 }).then((v) => (box.value = v));
+        return box;
+      });
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(answers.map((a) => a.value)).toEqual([undefined, undefined, undefined]);
+      expect(pending.map((s) => s.aborted)).toEqual([false, false, false]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(answers.map((a) => a.value)).toEqual([false, false, false]);
+      expect(pending.map((s) => s.aborted)).toEqual([true, true, true]); // nothing left running
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles at the deadline even if the transport ignores the abort', async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi({ fetchImpl: () => new Promise(() => {}) });
+      let settled;
+      api.jobWasRunning('00000000000a', { timeoutMs: 5000 }).then((v) => (settled = v));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(settled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('doesn’t abort a lookup that answered in time', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal;
+      const api = createApi({ fetchImpl: async (url, init) => { signal = init.signal; return json(200, { state: 'running' }); } });
+      expect(await api.jobWasRunning('00000000000a', { timeoutMs: 5000 })).toBe(true);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(signal.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('whenNews', () => {
+  it('speaks only if the job was live and the view still follows it, and never throws', async () => {
+    const said = [];
+    whenNews(Promise.resolve(true), () => true, () => said.push('live'));
+    whenNews(Promise.resolve(false), () => true, () => said.push('history'));
+    whenNews(Promise.resolve(true), () => false, () => said.push('moved on'));
+    whenNews(Promise.reject(new Error('x')), () => true, () => said.push('broken'));
+    whenNews(true, () => true, () => said.push('known'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(said.sort()).toEqual(['known', 'live']);
   });
 });
 

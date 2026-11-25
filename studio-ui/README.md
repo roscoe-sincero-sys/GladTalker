@@ -35,6 +35,62 @@ The project saves itself in the browser as you work. **Save project** / **Open�
 - **Display settings:** follows the OS light/dark theme, Windows High Contrast (`forced-colors`), and reduced motion. The layout reflows down to 320 px wide (1.4.10).
 - **Help:** the Help button is in the same top-right place on every step (3.2.6).
 
+## Desktop app
+
+`src-tauri/` wraps the same UI in a **Tauri v2** desktop app, **GladTalker Studio**. Python isn't bundled: the app uses your GladTalker folder and its Python environment, the same one you'd use for `python studio_server.py`.
+
+**Finding the engine.** When it starts, the app looks for a folder that contains `studio_server.py`, in this order:
+1. a folder you just chose with **Choose GladTalker folder…** (an explicit choice always wins);
+2. the `GLADTALKER_HOME` environment variable;
+3. the folder you chose in an earlier session;
+4. the folders around the app itself (for example, a development build inside the repository).
+
+Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that order. Set `GLADTALKER_PYTHON` to use a different interpreter. Relative paths in `GLADTALKER_HOME` and `GLADTALKER_PYTHON` are taken from the folder the app was started in.
+
+**Which GladTalker checkout works.** The folder must be at least as new as the desktop app (#11 phase 3): the app passes `studio_server.py` the `--exit-with-parent` option, which earlier checkouts (phase 2 and before) don't have. The app checks for it before starting the engine. With an older checkout, the setup screen names the folder and asks you to update it (for example `git pull`, then reinstall its requirements) or to choose a newer one; another, current checkout is used instead if one is found. If no folder is found, or the engine fails to start, the app explains why, shows the engine's last messages (the full log is in the app's log folder), and offers **Choose GladTalker folder…** and **Try again**.
+
+**What the app does:**
+- **Engine lifecycle:**
+  - It starts the engine on a free port with a fresh random token.
+  - The token goes in the engine's environment, never on its command line, which other programs can list.
+  - The engine always listens on `127.0.0.1`, whatever `GLADTALKER_STUDIO_HOST` says for web mode. The app checks the address the engine reports before using it.
+  - In development builds (`npm run tauri:dev`), the engine also accepts the dev server's origin (`build.devUrl`). Release builds never do.
+  - It stops the engine and everything it started when you close the app (Windows: the whole process tree; elsewhere: the engine's process group). The engine also watches the app's process (`--exit-with-parent`), so it stops even if the app crashes.
+  - Start, restart, and changing the folder happen one at a time, so a restart during a slow first start replaces the engine instead of returning the old one.
+- **Saving:** **Save project** opens a native Save dialog. Saving is atomic: the file is written next to the old one and then replaces it, so a failed save never leaves a truncated project. Saving over a file keeps who may read it: on Windows the new contents go to a file nobody else can open (no sharing, owner-only from creation), which gets the old file's access list (DACL) before anything is written, and `ReplaceFileW` swaps it in; on macOS and Linux they get its permission bits and group. If the swap fails partway, the previous version is put back, but only if nothing else has saved under that name meanwhile; otherwise both versions are kept and the error message says where. Long paths work on Windows even with long-path support turned off. **Open…** uses the system file picker.
+- **Finished videos:** **Show the video in its folder** opens the file manager. It only works for files the engine wrote, inside its workspace.
+- **While rendering:**
+  - Render progress appears on the taskbar icon.
+  - A notification fires when a render finishes or fails while you're working in another window.
+
+**Security:** the window's Content-Security-Policy only allows the app's own files plus connections to `127.0.0.1`. The page can call only the app's own commands; the dialog, notification, and opener plugins are used from Rust, and no plugin permissions are granted to the page.
+
+### Building the desktop app
+
+You need Node, plus [Rust](https://rustup.rs/) and the platform prerequisites for Tauri. On Windows that means the Microsoft C++ Build Tools ("Desktop development with C++") and WebView2, which comes with Windows 11.
+
+```bash
+cd studio-ui
+npm install
+npm run tauri:dev     # run it against the Vite dev server (hot reload)
+npm run tauri:build   # release build + installer (Windows: src-tauri/target/release/bundle/nsis/*.exe)
+```
+
+### Testing the desktop app
+
+- `cd src-tauri && cargo test` runs the Rust unit tests: engine discovery, the ready line, tokens, the workspace check, and atomic saving: an owner-only file stays owner-only, even while being written (Windows), and every partial failure of the swap leaves a complete copy of each version.
+- `npm run e2e:desktop` (Windows, after `npm run tauri:build`) launches the built app with `GLADTALKER_HOME` set to this repository, attaches Playwright to its WebView2 over the DevTools protocol, and checks that:
+  - each run uses its own temporary profile, so it never touches your own autosaved project, settings, or renders: a WebView2 profile (`WEBVIEW2_USER_DATA_FOLDER`), settings and logs (`GLADTALKER_STUDIO_DATA_DIR`), and an engine workspace (`GLADTALKER_STUDIO_WORKSPACE`), plus a free DevTools port. The profile path contains a space, and the app runs in the profile folder with a relative workspace, which it must resolve to the same absolute folder for the engine and for **Show in folder**;
+  - the engine starts;
+  - there are no axe WCAG 2.2 A/AA violations;
+  - an upload, face detection, and a real audio preview work;
+  - the engine listens on 127.0.0.1 even with `GLADTALKER_STUDIO_HOST=::1` set, and the token isn't on its command line;
+  - another profile's draft is untouched by a test run;
+  - closing the app stops the engine;
+  - killing the app stops the engine too.
+
+  Set `GLADTALKER_DESKTOP_EXE` to test another build.
+
 ## Development
 
 ```bash
@@ -71,5 +127,7 @@ npm run e2e      # Playwright: starts an engine and drives the built dist/ in Ch
 | `src/App.svelte` | Shell: header with stepper, project buttons, and Help; live regions; autosave |
 | `src/steps/` | `CastStep`, `ScriptStep`, `RollStep` |
 | `src/components/` | Stage, cast card, dialogue row, number field, progress, setup, help, badge |
-| `src/lib/` | API client, project state and persistence, region geometry, validation, palette |
+| `src/lib/` | API client, project state and persistence, region geometry, validation, palette, desktop bridge |
+| `src-tauri/` | Desktop app (Tauri v2): engine discovery and lifecycle, native dialogs, notifications |
+| `e2e-desktop/` | End-to-end tests of the built desktop app |
 | `tests/` / `e2e/` | Vitest / Playwright |

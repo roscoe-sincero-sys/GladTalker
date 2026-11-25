@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
-const engine = vi.hoisted(() => ({ urls: {}, created: [], revoked: [], linted: [] }));
+const engine = vi.hoisted(() => ({ urls: {}, created: [], revoked: [], linted: [], wasRunning: null }));
 
 vi.mock('../src/lib/api.js', async (importOriginal) => {
   const real = await importOriginal();
@@ -23,6 +23,7 @@ vi.mock('../src/lib/api.js', async (importOriginal) => {
         engine.linted.push(...lines);
         return { lines: lines.map((t) => (t ? [{ code: 'tts_contraction', message: 'Say “your”.', fix: `fixed: ${t}` }] : [])) };
       },
+      jobWasRunning: () => engine.wasRunning ?? Promise.resolve(false),
       watchJob: (id, onEvent) => {
         const job = finished(id, id === '00000000000a' ? 100 : 50);
         onEvent(job);
@@ -38,6 +39,7 @@ vi.mock('../src/lib/api.js', async (importOriginal) => {
 
 const { project, replaceProject, defaultProject } = await import('../src/lib/project.svelte.js');
 const ScriptStep = (await import('../src/steps/ScriptStep.svelte')).default;
+const { live } = await import('../src/lib/announce.svelte.js');
 
 describe('pronunciation suggestions', () => {
   it('are not offered for a line over the 1000-character limit, so Auto-Fix can’t cut it short', async () => {
@@ -60,6 +62,7 @@ describe('full-mix preview', () => {
   beforeEach(() => {
     engine.urls = {};
     engine.revoked = [];
+    engine.wasRunning = null;
     replaceProject({
       ...defaultProject(),
       cast: [{ id: 'c1', name: 'Brain', region: { x: 0, y: 0, w: 40, h: 40 } }],
@@ -85,5 +88,22 @@ describe('full-mix preview', () => {
     expect(screen.getByLabelText('Full audio mix').getAttribute('src')).toBe('blob:p2');
     expect(screen.getByText(/\(50 frames\)/)).toBeTruthy(); // the timing shown is p2's, matching the audio
     expect(screen.queryByText(/\(100 frames\)/)).toBeNull();
+  });
+
+  it('plays a finished preview at once, even while the job-state lookup is still pending', async () => {
+    let answer;
+    live.polite = '';
+    engine.wasRunning = new Promise((r) => (answer = r)); // the engine hasn't answered yet
+    project.lastPreviewJobId = '00000000000b';
+    render(ScriptStep);
+    await vi.waitFor(() => expect(engine.urls['00000000000b']).toBeTruthy()); // audio requested
+    engine.urls['00000000000b'].resolve('blob:p2');
+    await vi.waitFor(() => expect(screen.getByLabelText('Full audio mix').getAttribute('src')).toBe('blob:p2'));
+    expect(screen.getByRole('button', { name: /Preview full audio mix/ }).disabled).toBe(false);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(live.polite).not.toMatch(/Audio mix ready/); // not announced before we know it's news
+
+    answer(true); // it was still running when the step attached: its ending is news
+    await vi.waitFor(() => expect(live.polite).toMatch(/^Audio mix ready: 2 s/));
   });
 });

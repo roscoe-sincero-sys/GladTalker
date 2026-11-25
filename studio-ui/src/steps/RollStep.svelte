@@ -1,6 +1,6 @@
 <script>
   import { onDestroy, untrack } from 'svelte';
-  import { api, basename, revokeMedia } from '../lib/api.js';
+  import { api, basename, revokeMedia, whenNews } from '../lib/api.js';
   import { project, renderRequest } from '../lib/project.svelte.js';
   import { submitting, submitRender } from '../lib/jobs.svelte.js';
   import { engine, goTo, STEPS } from '../lib/app-state.svelte.js';
@@ -9,6 +9,7 @@
   import { frameLayout } from '../lib/regions.js';
   import { duration, timestamp } from '../lib/format.js';
   import JobProgress from '../components/JobProgress.svelte';
+  import { isDesktop, desktopCall } from '../lib/desktop.js';
 
   const PRESETS = [
     { id: 'hd720', label: '16:9 HD', size: [1280, 720], note: 'Video calls, presentations' },
@@ -93,18 +94,19 @@
     captionError = '';
     if (!id) return;
     const mine = following(id);
-    let live = false; // saw it running here, so its ending is news worth announcing
+    // Its ending is news only if it was still running when this view attached (the watcher
+    // replays the history of a render that finished earlier, too).
+    const wasRunning = api.jobWasRunning(id);
     watch = api.watchJob(id, (j) => {
-      if (!mine()) return;
-      if (j.state === 'queued' || j.state === 'running') live = true;
-      job = j;
+      if (mine()) job = j;
     });
     watch.done.then(
       (final) => {
         if (!mine() || !final) return;
-        if (final.state === 'succeeded') loadVideo(final, live);
-        else if (final.state === 'failed' && live) announceError(`Render failed: ${final.error || final.message}`);
-        else if (final.state === 'cancelled' && live) announce('Render cancelled.');
+        // The video loads at once; only the announcement waits for the lookup.
+        if (final.state === 'succeeded') loadVideo(final, wasRunning);
+        else if (final.state === 'failed') whenNews(wasRunning, mine, () => announceError(`Render failed: ${final.error || final.message}`));
+        else if (final.state === 'cancelled') whenNews(wasRunning, mine, () => announce('Render cancelled.'));
       },
       (err) => {
         // The engine no longer knows this job (it restarted, or dropped it from its history).
@@ -118,6 +120,7 @@
 
   // The video first, then the captions on their own: a caption hiccup never hides the video.
   // Each URL is kept only if this view still shows that render; otherwise it is released.
+  // `announceIt`: true, or jobWasRunning()'s answer (the video never waits for it).
   async function loadVideo(final, announceIt = true) {
     const mine = following(final.id);
     mediaError = '';
@@ -130,7 +133,7 @@
     }
     if (!mine()) return revokeMedia(url);
     setMedia(url, vttUrl, srtUrl);
-    if (announceIt) announce(`Your video is ready: ${duration(final.result.duration_s)}, ${final.result.width}×${final.result.height}. The player and download links are below.`);
+    whenNews(announceIt, mine, () => announce(`Your video is ready: ${duration(final.result.duration_s)}, ${final.result.width}×${final.result.height}. The player and download links are below.`));
     await loadCaptions(final);
   }
 
@@ -149,6 +152,16 @@
     }
     if (!mine()) return fetched.forEach(revokeMedia);
     setMedia(videoUrl, ...fetched);
+  }
+
+  const onDesktop = isDesktop();
+
+  async function showInFolder() {
+    try {
+      await desktopCall('reveal_file', { path: result.video_path });
+    } catch (err) {
+      announceError(err.message);
+    }
   }
 
   async function render() {
@@ -304,6 +317,9 @@
           {#if vttUrl}<li><a href={vttUrl} download={basename(result.vtt_path)}>Download captions (WebVTT)</a></li>{/if}
         </ul>
         <p class="muted">Saved on this computer in <code>{result.output_dir}</code></p>
+        {#if onDesktop}
+          <button type="button" onclick={showInFolder}>Show the video in its folder</button>
+        {/if}
         {#if result.captions?.length}
           <details>
             <summary>Transcript</summary>

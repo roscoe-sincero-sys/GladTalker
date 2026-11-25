@@ -67,8 +67,9 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
   WebSocketImpl = globalThis.WebSocket, location = globalThis.location } = {}) {
   const headers = (extra = {}) => (token ? { ...extra, Authorization: `Bearer ${token}` } : extra);
 
-  async function request(method, path, body, { asBlob = false, form = false } = {}) {
+  async function request(method, path, body, { asBlob = false, form = false, signal } = {}) {
     const init = { method, headers: headers() };
+    if (signal) init.signal = signal;
     if (form) init.body = body;
     else if (body !== undefined) {
       init.headers = headers({ 'Content-Type': 'application/json' });
@@ -208,11 +209,38 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
     previewAudio: (body) => request('POST', '/audio/preview', body),
     startRender: (body) => request('POST', '/render/start', body),
     job: async (id) => request('GET', jobPath(id)),
+    /** Was the job still queued or running when we looked? Only then is its ending news worth
+     * announcing or notifying: a watcher also replays the history of a job that ended long ago.
+     * Never rejects. After `timeoutMs` it gives up and aborts the request, so lookups never pile
+     * up behind a slow engine (an unknown state counts as "not running"). Use it only to decide
+     * on an announcement (see whenNews): never wait on it to show results. */
+    jobWasRunning: (id, { timeoutMs = JOB_LOOKUP_TIMEOUT_MS } = {}) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const lookup = Promise.resolve()
+        .then(() => request('GET', jobPath(id), undefined, { signal: controller.signal }))
+        .then((snapshot) => snapshot.state === 'queued' || snapshot.state === 'running', () => false);
+      // Settles at the deadline even if the transport ignores the abort.
+      const gaveUp = new Promise((resolve) => controller.signal.addEventListener('abort', () => resolve(false), { once: true }));
+      return Promise.race([lookup, gaveUp]).finally(() => clearTimeout(timer));
+    },
     cancelJob: async (id) => request('POST', jobPath(id, '/cancel')),
     fileUrl: async (id, kind) => mediaUrl(filePath(id, kind)),
     plainFileUrl: (id, kind) => `${base}${filePath(id, kind)}`,
     watchJob,
   };
+}
+
+/** How long jobWasRunning() waits for the engine before treating the job as not news. */
+export const JOB_LOOKUP_TIMEOUT_MS = 10_000;
+
+/** Says something about a job's ending once `wasRunning` (from jobWasRunning) settles, if the
+ * job was still live when the view attached and `stillCurrent()` holds. Returns at once: the
+ * lookup never holds up the result itself (the video, the audio, the error shown on screen). */
+export function whenNews(wasRunning, stillCurrent, say) {
+  Promise.resolve(wasRunning).then((live) => {
+    if (live && stillCurrent()) say();
+  }, () => {});
 }
 
 /** Release a URL made by mediaUrl() (a no-op for plain URLs). */
@@ -225,3 +253,9 @@ export function basename(path) {
 }
 
 export const api = createApi({ token: readEngineToken() });
+
+/** Point the shared client at another engine (the desktop app's private port and token). Every
+ * module keeps using the same `api` object. */
+export function configureApi(options) {
+  Object.assign(api, createApi(options));
+}

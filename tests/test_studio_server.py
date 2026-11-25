@@ -15,7 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from src.studio import pipeline
 from src.studio.faces import FaceBox
 from src.studio.jobs import JobManager
-from src.studio.server import DEFAULT_HOSTS, StudioConfig, StudioServices, create_app
+from src.studio.server import DEFAULT_HOSTS, DEFAULT_ORIGINS, StudioConfig, StudioServices, create_app
 
 
 class FakeTTS:
@@ -287,6 +287,35 @@ class StudioServerTests(unittest.TestCase):
             other = client.post(f"/jobs/{job_id}/ws-ticket", headers=auth).json()["ticket"]
             with self.assertRaises(WebSocketDisconnect):
                 with client.websocket_connect(f"/ws/jobs/someotherjob?ticket={other}") as ws:
+                    ws.receive_json()
+
+    def test_desktop_dev_origin_reaches_a_token_protected_engine(self):
+        """`npm run tauri:dev` loads the UI from http://localhost:5173 and talks to the engine on
+        its own port, so the shell starts the engine with --allow-origin for that dev origin
+        (debug builds only). That origin must get through over HTTP (the authenticated preflight
+        and the request) and over WebSocket; any other origin still doesn't."""
+        dev = "http://localhost:5173"
+        config = StudioConfig(workspace=self.tmp / "ws-dev", token="s3cret", allowed_hosts=DEFAULT_HOSTS + ["testserver"],
+                              allowed_origins=list(DEFAULT_ORIGINS) + [dev])
+        auth = {"Authorization": "Bearer s3cret"}
+        with TestClient(create_app(config, self.services)) as client:
+            preflight = client.options("/hardware", headers={"Origin": dev, "Access-Control-Request-Method": "GET",
+                                                             "Access-Control-Request-Headers": "authorization"})
+            self.assertEqual(preflight.status_code, 200, preflight.text)
+            self.assertEqual(preflight.headers["access-control-allow-origin"], dev)
+            r = client.get("/hardware", headers={"Origin": dev, **auth})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.headers["access-control-allow-origin"], dev)
+            self.assertEqual(client.get("/hardware", headers={"Origin": "http://localhost:5174", **auth}).status_code, 403)
+
+            with mock.patch.object(pipeline, "render", self._fake_render()):
+                job_id = client.post("/render/start", json=_render_body(self.image), headers={"Origin": dev, **auth}).json()["id"]
+            ticket = client.post(f"/jobs/{job_id}/ws-ticket", headers={"Origin": dev, **auth}).json()
+            with client.websocket_connect(ticket["url"], headers={"origin": dev}) as ws:
+                self.assertEqual(ws.receive_json()["type"], "state")
+            other = client.post(f"/jobs/{job_id}/ws-ticket", headers=auth).json()
+            with self.assertRaises(WebSocketDisconnect):
+                with client.websocket_connect(other["url"], headers={"origin": "http://localhost:5174"}) as ws:
                     ws.receive_json()
 
     def test_cross_origin_requests_rejected_before_side_effects(self):
