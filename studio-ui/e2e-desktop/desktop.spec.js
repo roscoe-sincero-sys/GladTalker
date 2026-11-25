@@ -21,11 +21,16 @@ test.skip(!fs.existsSync(EXE), `build the app first (npm run tauri:build); no ${
 
 /** Engine processes started by the app with this PID (their --exit-with-parent argument). */
 function enginesOf(appPid) {
+  return engineCommandLines(appPid).map((line) => Number(line.split(' ', 1)[0]));
+}
+
+/** "PID commandline" for each of the app's engine processes. */
+function engineCommandLines(appPid) {
   // Only Python processes: this PowerShell command's own command line contains the same words.
   const out = execFileSync('powershell', ['-NoProfile', '-Command',
-    `Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" | Where-Object { $_.CommandLine -match 'studio_server.py' -and $_.CommandLine -match '--exit-with-parent ${appPid}\\b' } | ForEach-Object { $_.ProcessId }`],
+    `Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" | Where-Object { $_.CommandLine -match 'studio_server.py' -and $_.CommandLine -match '--exit-with-parent ${appPid}\\b' } | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }`],
   { encoding: 'utf-8' });
-  return out.split(/\s+/).filter(Boolean).map(Number);
+  return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 }
 
 async function waitFor(check, timeoutMs, what) {
@@ -75,6 +80,9 @@ test('the desktop app starts its engine, works end to end, and stops the engine 
     await page.getByRole('button', { name: 'New', exact: true }).click();
     const engines = await waitFor(() => enginesOf(app.pid), 10_000, 'the engine process');
     expect(engines.length).toBeGreaterThan(0);
+    // The token travels in the engine's environment, never on its command line (which any
+    // program on the computer can list).
+    for (const line of engineCommandLines(app.pid)) expect(line).not.toMatch(/--token/);
 
     // No WCAG 2.2 A/AA violations in the desktop window. (Evaluated over CDP, which the page's
     // Content-Security-Policy doesn't apply to; the policy itself stays on.)

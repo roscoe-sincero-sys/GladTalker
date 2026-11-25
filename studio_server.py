@@ -116,7 +116,9 @@ def main(argv=None) -> int:
             if self.started and not self.should_exit:
                 print(ready_line, flush=True)
                 if args.open:
-                    open_in_browser(f"http://{'localhost' if is_loopback(args.host) else shown}:{port}/")
+                    # The announced address, not "localhost": that's a different browser origin
+                    # (with its own saved project) and may resolve to ::1, which isn't bound.
+                    open_in_browser(f"http://{shown}:{port}/")
 
     server = AnnouncingServer(uvicorn.Config(app, log_level=args.log_level, ws="auto"))
     if args.exit_with_parent:

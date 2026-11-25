@@ -13,6 +13,7 @@ export const STEPS = [
 export const engine = $state({
   status: 'connecting', // connecting | ready | offline | setup (desktop: no usable engine yet)
   desktop: null, // desktop app only: the shell's engine status ({ state, message, folder, log, ... })
+  notice: '', // something worth knowing that doesn't stop anything (shown until dismissed)
   error: '',
   version: '',
   hardware: null,
@@ -57,6 +58,7 @@ async function startDesktopEngine(command, args) {
     return false;
   }
   configureApi({ base: status.base, token: status.token });
+  if (status.note) engine.notice = status.note;
   return true;
 }
 

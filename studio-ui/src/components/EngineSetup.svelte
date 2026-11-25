@@ -29,7 +29,10 @@
     {#if info.log}
       <details>
         <summary>The engine’s last messages</summary>
-        <pre class="log" tabindex="0" aria-label="The engine’s last messages">{info.log}</pre>
+        <!-- A labelled, focusable region, so keyboard users can scroll a long log (axe's
+             scrollable-region-focusable; WCAG 2.1.1). Svelte flags any tabindex on a non-widget. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <pre class="log" role="region" tabindex="0" aria-label="The engine’s last messages">{info.log}</pre>
       </details>
     {/if}
     {#if info.log_path}<p class="muted">The full log is in <code>{info.log_path}</code></p>{/if}

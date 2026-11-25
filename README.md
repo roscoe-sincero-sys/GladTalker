@@ -234,7 +234,7 @@ There are two ways to run it, both using your GladTalker folder and its Python e
 - **Web mode:** run the engine and use your browser.
 
   ```bash
-  python studio_server.py --open     # opens http://localhost:7860 (API docs at /docs)
+  python studio_server.py --open     # opens http://127.0.0.1:7860 (API docs at /docs)
   ```
 
 The engine serves the UI and a FastAPI + WebSocket API for hardware detection, model downloads, face auto-casting, voice and full-mix previews, script import, and render jobs with live progress and `.srt`/`.vtt` captions. See [studio-ui/README.md](studio-ui/README.md) for the UI and [docs/studio_api.md](docs/studio_api.md) for the API.

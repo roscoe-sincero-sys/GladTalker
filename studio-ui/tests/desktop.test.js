@@ -94,6 +94,15 @@ describe('starting the engine from the desktop app', () => {
     expect(host.invoke).toHaveBeenLastCalledWith('restart_engine', {});
   });
 
+  it('passes on a note from the shell (say, the chosen folder couldn’t be remembered)', async () => {
+    shell({ start_engine: { ...READY, note: 'GladTalker Studio couldn’t remember this folder for next time (denied).' } });
+    engineFetch();
+    engine.notice = '';
+    await connectEngine();
+    expect(engine.status).toBe('ready');
+    expect(engine.notice).toMatch(/couldn’t remember this folder/);
+  });
+
   it('leaves things as they were when the folder dialog is cancelled', async () => {
     shell({ start_engine: { state: 'not_found', message: 'Choose it.', folder: null }, choose_engine_folder: null });
     await connectEngine();

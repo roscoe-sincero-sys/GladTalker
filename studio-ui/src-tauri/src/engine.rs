@@ -3,13 +3,17 @@
 //! The desktop app doesn't bundle Python. It uses a GladTalker folder that already has a Python
 //! environment set up (see the README), which it finds in this order:
 //!
-//! 1. the `GLADTALKER_HOME` environment variable;
-//! 2. the folder chosen earlier with "Choose GladTalker folder…" (saved in the app's config);
-//! 3. a GladTalker folder that contains the app (a development build, or the app copied there).
+//! 1. the folder just chosen with "Choose GladTalker folder…" (this session), so an explicit
+//!    choice always wins, even over a stale `GLADTALKER_HOME`;
+//! 2. the `GLADTALKER_HOME` environment variable;
+//! 3. the folder chosen in an earlier session (saved in the app's config);
+//! 4. a GladTalker folder that contains the app (a development build, or the app copied there).
 //!
 //! Inside it, Python is `GLADTALKER_PYTHON` if set, else the first of `venv-dml`, `venv`, `.venv`
 //! that exists. The engine is started on a free port with a fresh random token, and told to shut
-//! itself down if the app goes away (`--exit-with-parent`).
+//! itself down if the app goes away (`--exit-with-parent`). The token is passed in the
+//! environment (`GLADTALKER_STUDIO_TOKEN`), never on the command line, which other programs on
+//! the computer can read.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -42,8 +46,9 @@ pub enum Status {
     NotFound { message: String, folder: Option<String> },
     /// Started, but it stopped or never became ready.
     Failed { message: String, folder: String, python: String, log: String, log_path: String },
-    /// Running and accepting requests at `base` with `token`.
-    Ready { base: String, token: String, folder: String, python: String, workspace: String },
+    /// Running and accepting requests at `base` with `token`. `note`: something the user should
+    /// know that doesn't stop them (say, the chosen folder couldn't be remembered).
+    Ready { base: String, token: String, folder: String, python: String, workspace: String, note: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,8 +78,14 @@ fn venv_python(venv: &Path) -> PathBuf {
 }
 
 /// Folders to try, best first (see the module docs).
-pub fn candidate_folders(home: Option<PathBuf>, saved: Option<PathBuf>, exe: Option<PathBuf>) -> Vec<PathBuf> {
+pub fn candidate_folders(
+    chosen: Option<PathBuf>,
+    home: Option<PathBuf>,
+    saved: Option<PathBuf>,
+    exe: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
+    out.extend(chosen);
     out.extend(home);
     out.extend(saved);
     if let Some(exe) = exe {
@@ -189,14 +200,14 @@ pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
     let workspace = workspace_of(&found.folder);
     let mut cmd = Command::new(&found.python);
     cmd.arg("studio_server.py")
-        .args(["--port", "0", "--log-level", "warning", "--token", &token])
+        .args(["--port", "0", "--log-level", "warning"])
         .args(["--exit-with-parent", &std::process::id().to_string()])
         .arg("--workspace")
         .arg(&workspace)
         .current_dir(&found.folder)
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONIOENCODING", "utf-8")
-        .env_remove("GLADTALKER_STUDIO_TOKEN")
+        .env("GLADTALKER_STUDIO_TOKEN", &token) // not in argv: process lists show command lines
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -205,6 +216,12 @@ pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    {
+        // Its own process group, so stop() can end the engine and anything it started (FFmpeg).
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
 
     let failed = |message: String, log: String| Status::Failed {
@@ -256,6 +273,7 @@ pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
                     folder: found.folder.display().to_string(),
                     python: found.python.display().to_string(),
                     workspace: workspace.display().to_string(),
+                    note: None,
                 };
                 return Ok(Running { child, status });
             }
@@ -277,8 +295,17 @@ pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
 }
 
 /// Stops the engine and everything it started. On Windows a venv's python.exe is a launcher
-/// whose child is the real interpreter, so the whole process tree is ended.
+/// whose child is the real interpreter, so the whole process tree is ended; elsewhere the
+/// engine's process group is.
 pub fn stop(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -371,11 +398,13 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_home_then_saved_then_folders_around_the_app() {
+    fn candidates_are_chosen_then_home_then_saved_then_folders_around_the_app() {
         let exe = PathBuf::from("/x/gt/studio-ui/src-tauri/target/debug/app.exe");
-        let c = candidate_folders(Some("/home".into()), Some("/saved".into()), Some(exe));
-        assert_eq!(c[0], PathBuf::from("/home"));
-        assert_eq!(c[1], PathBuf::from("/saved"));
+        let c = candidate_folders(Some("/chosen".into()), Some("/home".into()), Some("/saved".into()), Some(exe.clone()));
+        assert_eq!(c[0], PathBuf::from("/chosen")); // what the user just picked beats GLADTALKER_HOME
+        assert_eq!(c[1], PathBuf::from("/home"));
+        assert_eq!(c[2], PathBuf::from("/saved"));
+        assert_eq!(candidate_folders(None, Some("/home".into()), None, Some(exe))[0], PathBuf::from("/home"));
         assert!(c.contains(&PathBuf::from("/x/gt")));
         assert!(!c.contains(&PathBuf::from("/x/gt/studio-ui/src-tauri/target/debug/app.exe")));
     }

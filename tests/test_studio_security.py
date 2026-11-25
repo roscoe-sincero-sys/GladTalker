@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -196,8 +197,8 @@ class MemoryBudgetTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
-    def _launch(self, *args):
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    def _launch(self, *args, env=None):
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})}
         env.pop("GLADTALKER_STUDIO_TOKEN", None)
         return subprocess.Popen([sys.executable, str(REPO_ROOT / "studio_server.py"), *args],
                                 cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -247,6 +248,40 @@ class LauncherTests(unittest.TestCase):
         gone = subprocess.Popen([sys.executable, "-c", "pass"])
         gone.wait(timeout=30)
         self.assertTrue(wait_for_exit(gone.pid, poll_s=0.05))
+
+    def test_open_flag_opens_the_announced_address(self):
+        """--open opens the same origin as the ready line (and the docs), once the engine is
+        ready: not "localhost", which is another browser origin with its own saved project, and
+        may resolve to ::1, which isn't bound. A stand-in browser (BROWSER) records the URL."""
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp(prefix="gladtalker_open_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        record = tmp / "opened.txt"
+        fake_browser = tmp / "fake_browser.py"
+        # Written to a temporary name, then renamed: the test never reads a half-written file.
+        fake_browser.write_text("import os, sys, pathlib\n"
+                                f"tmp = pathlib.Path({str(record) + '.tmp'!r})\n"
+                                "tmp.write_text(sys.argv[1])\n"
+                                f"os.replace(tmp, {str(record)!r})\n", encoding="utf-8")
+        env_browser = f'"{sys.executable}" "{fake_browser}" %s'
+        proc = self._launch("--port", "0", "--open", "--log-level", "warning", env={"BROWSER": env_browser})
+        try:
+            event = json.loads(proc.stdout.readline())
+            deadline = time.time() + 30
+            opened = ""
+            while not opened and time.time() < deadline:
+                try:
+                    opened = record.read_text()
+                except (FileNotFoundError, PermissionError):  # not there yet / briefly locked (AV scan)
+                    pass
+                if not opened:
+                    time.sleep(0.1)
+            self.assertEqual(opened, f"{event['url']}/")
+            self.assertTrue(event["url"].startswith("http://127.0.0.1:"))
+        finally:
+            proc.terminate()
+            proc.communicate(timeout=30)
 
     def test_ready_line_means_reachable(self):
         proc = self._launch("--port", "0", "--log-level", "warning")

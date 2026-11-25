@@ -40,14 +40,19 @@ The project saves itself in the browser as you work. **Save project** / **Open�
 `src-tauri/` wraps the same UI in a **Tauri v2** desktop app, **GladTalker Studio**. Python isn't bundled: the app uses your GladTalker folder and its Python environment, the same one you'd use for `python studio_server.py`.
 
 **Finding the engine.** When it starts, the app looks for a folder that contains `studio_server.py`, in this order:
-1. the `GLADTALKER_HOME` environment variable;
-2. the folder you chose earlier with **Choose GladTalker folder…**;
-3. the folders around the app itself (for example, a development build inside the repository).
+1. a folder you just chose with **Choose GladTalker folder…** (an explicit choice always wins);
+2. the `GLADTALKER_HOME` environment variable;
+3. the folder you chose in an earlier session;
+4. the folders around the app itself (for example, a development build inside the repository).
 
 Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that order. Set `GLADTALKER_PYTHON` to use a different interpreter. If no folder is found, or the engine fails to start, the app explains why, shows the engine's last messages (the full log is in the app's log folder), and offers **Choose GladTalker folder…** and **Try again**.
 
 **What the app does:**
-- **Engine lifecycle:** it starts the engine on a free port with a fresh random token, and nothing else on the computer is told either. It stops the engine when you close the app. The engine also watches the app's process (`--exit-with-parent`), so it stops even if the app crashes.
+- **Engine lifecycle:**
+  - It starts the engine on a free port with a fresh random token.
+  - The token goes in the engine's environment, never on its command line, which other programs can list.
+  - It stops the engine and everything it started when you close the app (Windows: the whole process tree; elsewhere: the engine's process group). The engine also watches the app's process (`--exit-with-parent`), so it stops even if the app crashes.
+  - Start, restart, and changing the folder happen one at a time, so a restart during a slow first start replaces the engine instead of returning the old one.
 - **Saving:** **Save project** opens a native Save dialog. **Open…** uses the system file picker.
 - **Finished videos:** **Show the video in its folder** opens the file manager. It only works for files the engine wrote, inside its workspace.
 - **While rendering:**

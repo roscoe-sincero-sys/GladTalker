@@ -115,6 +115,12 @@
   </header>
 
   <main id="main" tabindex="-1">
+    {#if engine.notice}
+      <div class="notice card" role="status">
+        <p>{engine.notice}</p>
+        <button type="button" onclick={() => (engine.notice = '')}>Dismiss</button>
+      </div>
+    {/if}
     {#if engine.status === 'offline'}
       <section class="card offline" aria-labelledby="offline-heading">
         <h2 id="offline-heading">Can’t reach the GladTalker engine</h2>
@@ -124,7 +130,8 @@
         {:else}
           <p>Start it with <code>python studio_server.py</code> (in the GladTalker folder), then try again.</p>
         {/if}
-        <button type="button" class="primary" onclick={() => connectEngine()}>Try again</button>
+        <!-- Desktop: restart it (it may still be running but stuck). -->
+        <button type="button" class="primary" onclick={() => connectEngine({ restart: onDesktop })}>Try again</button>
       </section>
     {:else if engine.status === 'setup'}
       <EngineSetup />
@@ -160,5 +167,8 @@
 
 <style>
   .offline { border-left: 6px solid var(--error); }
+  .notice { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; justify-content: space-between;
+    margin-bottom: 1rem; border-left: 6px solid var(--accent); }
+  .notice p { margin: 0; }
   .project { gap: 0.35rem; }
 </style>

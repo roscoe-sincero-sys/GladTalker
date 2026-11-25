@@ -8,10 +8,14 @@
 //! - a desktop notification when a render ends while the app is in the background;
 //! - render progress on the taskbar icon.
 
+// Status is the error type for starting the engine: it happens once per start and is sent to the
+// UI as is, so its size (a few strings) doesn't matter and boxing it would only add noise.
+#![allow(clippy::result_large_err)]
+
 mod engine;
+mod supervisor;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use tauri::window::{ProgressBarState, ProgressBarStatus};
 use tauri::{AppHandle, Manager, RunEvent, WebviewWindow};
@@ -20,15 +24,13 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 use engine::Status;
+use supervisor::Supervisor;
 
 const MAX_PROJECT_BYTES: usize = 50 * 1024 * 1024;
 
-#[derive(Default)]
-struct AppState {
-    /// Held while the engine is being started, so two calls never start two engines.
-    starting: Mutex<()>,
-    engine: Mutex<Option<engine::Running>>,
-}
+/// The one engine this app runs (see supervisor.rs: start, restart, and folder changes are
+/// serialized, so none of them acts on a stale engine).
+type AppState = Supervisor<engine::Running>;
 
 fn config_file(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("engine.json"))
@@ -42,39 +44,29 @@ fn log_file(app: &AppHandle) -> PathBuf {
 }
 
 fn stop_engine(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let running = state.engine.lock().unwrap().take();
-    drop(running); // Drop stops the process tree
+    app.state::<AppState>().stop();
 }
 
-/// Starts the engine if it isn't running, and reports its state.
-fn ensure_started(app: &AppHandle) -> Status {
-    let state = app.state::<AppState>();
-    let _one_at_a_time = state.starting.lock().unwrap();
-    {
-        let mut running = state.engine.lock().unwrap();
-        if let Some(r) = running.as_mut() {
-            if r.is_alive() {
-                return r.status.clone();
-            }
+/// Starts the engine if it isn't running (with `restart`, stops it first; with `choose`, uses
+/// that folder from now on), and reports its state.
+fn ensure_started(app: &AppHandle, restart: bool, choose: Option<PathBuf>) -> Status {
+    app.state::<AppState>().ensure(restart, choose, |chosen| {
+        let saved = config_file(app).map(|p| engine::load_choice(&p).folder).unwrap_or_default();
+        let home = std::env::var_os("GLADTALKER_HOME").map(PathBuf::from);
+        let python = std::env::var_os("GLADTALKER_PYTHON").map(PathBuf::from);
+        let candidates = engine::candidate_folders(chosen, home, saved, std::env::current_exe().ok());
+        let found = engine::locate(&candidates, python.as_deref())?;
+        engine::start(&found, &log_file(app))
+    })
+}
+
+/// Adds a note for the user to a Ready status (the UI announces it).
+fn with_note(status: Status, note: String) -> Status {
+    match status {
+        Status::Ready { base, token, folder, python, workspace, .. } => {
+            Status::Ready { base, token, folder, python, workspace, note: Some(note) }
         }
-        *running = None;
-    }
-    let saved = config_file(app).map(|p| engine::load_choice(&p).folder).unwrap_or_default();
-    let home = std::env::var_os("GLADTALKER_HOME").map(PathBuf::from);
-    let python = std::env::var_os("GLADTALKER_PYTHON").map(PathBuf::from);
-    let candidates = engine::candidate_folders(home, saved, std::env::current_exe().ok());
-    let found = match engine::locate(&candidates, python.as_deref()) {
-        Ok(found) => found,
-        Err(status) => return status,
-    };
-    match engine::start(&found, &log_file(app)) {
-        Ok(running) => {
-            let status = running.status.clone();
-            *state.engine.lock().unwrap() = Some(running);
-            status
-        }
-        Err(status) => status,
+        other => other,
     }
 }
 
@@ -84,16 +76,12 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 
 #[tauri::command]
 async fn start_engine(app: AppHandle) -> Result<Status, String> {
-    blocking(move || ensure_started(&app)).await
+    blocking(move || ensure_started(&app, false, None)).await
 }
 
 #[tauri::command]
 async fn restart_engine(app: AppHandle) -> Result<Status, String> {
-    blocking(move || {
-        stop_engine(&app);
-        ensure_started(&app)
-    })
-    .await
+    blocking(move || ensure_started(&app, true, None)).await
 }
 
 /// Lets the user point at their GladTalker folder. Returns None if they cancel.
@@ -115,11 +103,14 @@ async fn choose_engine_folder(app: AppHandle) -> Result<Option<Status>, String> 
                 folder: None,
             });
         }
-        if let Some(path) = config_file(&app) {
-            let _ = engine::save_choice(&path, &engine::SavedChoice { folder: Some(folder) });
-        }
-        stop_engine(&app);
-        Some(ensure_started(&app))
+        let saved = config_file(&app)
+            .map(|path| engine::save_choice(&path, &engine::SavedChoice { folder: Some(folder.clone()) }));
+        // Used first from now on in this session, whether or not it could be remembered.
+        let status = ensure_started(&app, true, Some(folder));
+        Some(match saved {
+            Some(Err(err)) => with_note(status, format!("GladTalker Studio couldn’t remember this folder for next time ({err}).")),
+            _ => status,
+        })
     })
     .await
 }
@@ -150,7 +141,7 @@ async fn save_project(app: AppHandle, contents: String, suggested_name: String) 
 /// "Show in folder" for a finished render. Only files the engine wrote (inside its workspace).
 #[tauri::command]
 fn reveal_file(app: AppHandle, path: String) -> Result<(), String> {
-    let workspace = match app.state::<AppState>().engine.lock().unwrap().as_ref().map(|r| r.status.clone()) {
+    let workspace = match app.state::<AppState>().current() {
         Some(Status::Ready { workspace, .. }) => PathBuf::from(workspace),
         _ => return Err("The engine isn't running.".into()),
     };
