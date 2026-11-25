@@ -25,20 +25,22 @@
     onchange(value);
   }
 
+  // At a limit the −/+ button is aria-disabled (it keeps focus) and does nothing at all: no clamp,
+  // no onchange, even if a loaded project holds a value outside the range.
   const describedBy = $derived([hint && `${id}-hint`, error && `${id}-error`].filter(Boolean).join(' ') || undefined);
 </script>
 
 <div class="number-field">
   <label for={id} class:visually-hidden={hideLabel}>{label}</label>
   <div class="controls">
-    <button type="button" class="icon" aria-label="Decrease {label}" disabled={value <= min}
-      onclick={() => set(value - step)}>−</button>
+    <button type="button" class="icon" aria-label="Decrease {label}" aria-disabled={value <= min ? 'true' : undefined}
+      onclick={() => { if (value > min) set(value - step); }}>−</button>
     <input {id} type="number" inputmode="decimal" {min} {max} {step} value={value}
       aria-describedby={describedBy} aria-invalid={error ? 'true' : undefined}
       onchange={(e) => set(e.currentTarget.value)} />
     {#if unit}<span class="unit" aria-hidden="true">{unit}</span>{/if}
-    <button type="button" class="icon" aria-label="Increase {label}" disabled={value >= max}
-      onclick={() => set(value + step)}>+</button>
+    <button type="button" class="icon" aria-label="Increase {label}" aria-disabled={value >= max ? 'true' : undefined}
+      onclick={() => { if (value < max) set(value + step); }}>+</button>
   </div>
   {#if hint}<p class="hint" id="{id}-hint">{hint}</p>{/if}
   {#if error}<p class="error-text" id="{id}-error">{error}</p>{/if}

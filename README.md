@@ -226,7 +226,7 @@ You can also start it more easily:
 
 ### GladTalker Studio (preview)
 
-**GladTalker Studio** ([#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11)) turns a picture and a script into a multi-character talking scene in three steps, **Cast → Script → Roll**, with no terminal commands or Python editing. The interface is designed for WCAG 2.2 AA: it works fully by keyboard and with screen readers, never needs dragging, reflows at 320 px, and supports light/dark/High Contrast.
+**GladTalker Studio** ([#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11)) turns a picture and a script into a multi-character talking scene in three steps, **Cast → Script → Roll**, with no terminal commands or Python editing. The interface is designed for WCAG 2.2 AA: it works fully by keyboard and with screen readers, never needs dragging, reflows at 320 px, and supports light/dark/High Contrast. The [WCAG 2.2 AA / WCAG2ICT audit](docs/accessibility/wcag22-audit.md) maps every criterion to the test that checks it, and lists the checks that still need a person.
 
 There are two ways to run it, both using your GladTalker folder and its Python environment:
 

@@ -221,3 +221,102 @@ test('if the app crashes, its engine still shuts itself down', async () => {
   await waitFor(() => enginesOf(pid).length === 0, 60_000, 'the orphaned engine to notice and exit');
   try { fs.rmSync(profile.root, { recursive: true, force: true }); } catch { /* WebView2 may still be letting go */ }
 });
+
+/** Types real keystrokes into the app's window (only if it is in front; see send-keys.ps1). */
+// Real keystrokes need the app's window in front, which Windows doesn't always allow (for example
+// in a service or remote session, or while another app holds the foreground). Then the check is
+// skipped, with the reason. GLADTALKER_DESKTOP_INTERACTIVE=1 (npm run e2e:desktop:interactive)
+// makes it a failure instead, for runs on a desktop where it must work.
+const MUST_TYPE = process.env.GLADTALKER_DESKTOP_INTERACTIVE === '1';
+
+/** Types real keystrokes into the app's window (only if it is in front; see send-keys.ps1).
+ * Returns false if Windows wouldn't bring the window to the front (nothing was typed). */
+function sendKeys(appPid, keys, times = 1) {
+  try {
+    execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+      path.join(import.meta.dirname, 'send-keys.ps1'), '-AppPid', String(appPid), '-Keys', keys, '-Times', String(times)],
+    { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return true;
+  } catch (err) {
+    if (err.status === 3 && !MUST_TYPE) return false; // not in front: nothing was sent
+    throw err;
+  }
+}
+
+/** What Windows UI Automation (Narrator, NVDA, JAWS) exposes for the app's window. */
+function uiaTree(appPid) {
+  const out = execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    path.join(import.meta.dirname, 'uia-tree.ps1'), '-AppPid', String(appPid)], { encoding: 'utf-8' });
+  // Windows PowerShell 5.1's ConvertTo-Json leaves some control characters in names unescaped;
+  // the output is one line, so any control character is inside a string and can become a space.
+  const parsed = JSON.parse(out.trim().replace(/[\u0000-\u001f]/g, ' ') || '[]');
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+test('screen readers get named controls, headings, and landmarks through UI Automation (WCAG2ICT 4.1.2, 1.3.1, 2.4.2)', async () => {
+  test.setTimeout(6 * 60_000);
+  const profile = newProfile();
+  const launched = await launchApp(profile);
+  const { app, page } = launched;
+  try {
+    await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
+    await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
+    await page.getByRole('button', { name: /Auto-Detect Cast/ }).click();
+    await expect(page.getByRole('group', { name: /Cast member 1/ })).toBeVisible({ timeout: 60_000 });
+
+    // Chromium builds its UI Automation tree when a client first asks: wait until it is complete.
+    let tree = [];
+    const has = (localized, name) => tree.some((e) => e.localized === localized && (name instanceof RegExp ? name.test(e.name) : e.name === name));
+    await waitFor(() => {
+      tree = uiaTree(app.pid);
+      return has('heading', 'Step 1 of 3: Cast') && has('button', /Auto-Detect Cast/);
+    }, 60_000, 'the UI Automation tree');
+
+    // The window's document is named after the app (2.4.2); the skip link, the step heading,
+    // and the landmarks are there (2.4.1, 1.3.1).
+    expect(has('document', 'GladTalker Studio')).toBe(true);
+    expect(has('link', 'Skip to the current step')).toBe(true);
+    expect(has('navigation', 'Steps')).toBe(true);
+    expect(tree.some((e) => e.localized === 'main')).toBe(true);
+    // The step buttons' names include their state once a step is done ("Cast, done").
+    for (const name of [/^Cast/, /^Script/, /^Roll/, /^Help$/, /^Next: Script/]) expect(has('button', name), String(name)).toBe(true);
+    // Cast member fields keep their visible labels as names (2.5.3, 3.3.2).
+    expect(tree.some((e) => e.type === 'Edit' && e.name === 'Name')).toBe(true);
+    // Every control a keyboard user can reach has a name (4.1.2).
+    const CONTROLS = new Set(['Button', 'Edit', 'ComboBox', 'CheckBox', 'RadioButton', 'Hyperlink', 'Spinner', 'Slider', 'List', 'ListItem']);
+    const unnamed = tree.filter((e) => e.focusable && e.enabled && CONTROLS.has(e.type) && !String(e.name || '').trim());
+    expect(unnamed, 'focusable controls without a name').toEqual([]);
+  } finally {
+    await closeApp(launched);
+  }
+  fs.rmSync(profile.root, { recursive: true, force: true });
+});
+
+test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (WCAG2ICT 1.4.4)', async () => {
+  test.setTimeout(6 * 60_000);
+  const profile = newProfile();
+  const launched = await launchApp(profile);
+  const { app, page } = launched;
+  try {
+    await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
+    const layout = () => page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, ratio: devicePixelRatio }));
+    const normal = await layout();
+    // WebView2's zoom steps: 110, 125, 150, 175, 200 %. Zoom only answers real keyboard input
+    // (not keys sent over the DevTools protocol), so these are typed into the app's window.
+    const typed = sendKeys(app.pid, '^{ADD}', 5);
+    test.skip(!typed, 'Windows would not bring the app window to the front, so no keys could be typed. '
+      + 'Run npm run e2e:desktop:interactive on a desktop session to require this check.');
+    await expect.poll(async () => (await layout()).width).toBeLessThanOrEqual(Math.ceil(normal.width / 2) + 2);
+    const zoomed = await layout();
+    expect(zoomed.ratio).toBeCloseTo(normal.ratio * 2, 1);
+    expect(zoomed.scrollWidth, 'no horizontal scrolling at 200 %').toBeLessThanOrEqual(zoomed.width);
+    await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
+    await page.getByRole('button', { name: 'Next: Script' }).click(); // still works
+    await expect(page.getByRole('heading', { name: 'Step 2 of 3: Script' })).toBeVisible();
+    expect(sendKeys(app.pid, '^0')).toBe(true);
+    await expect.poll(async () => (await layout()).width).toBe(normal.width);
+  } finally {
+    await closeApp(launched);
+  }
+  fs.rmSync(profile.root, { recursive: true, force: true });
+});

@@ -1,86 +1,7 @@
 // End-to-end: the built Studio UI against a real engine (see playwright.config.js).
 import { test, expect } from '@playwright/test';
 import { E2E_TOKEN } from '../playwright.config.js';
-import { createRequire } from 'node:module';
-import path from 'node:path';
-
-const require = createRequire(import.meta.url);
-const AXE = require.resolve('axe-core/axe.min.js');
-const PORTRAIT = path.resolve(import.meta.dirname, '../../examples/source_image/people_0.png');
-const WCAG_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
-
-async function axeViolations(page) {
-  await page.addScriptTag({ path: AXE });
-  return page.evaluate(async (tags) => {
-    const res = await window.axe.run(document, { runOnly: { type: 'tag', values: tags } });
-    return res.violations.map((v) => ({ id: v.id, impact: v.impact, help: v.help,
-      nodes: v.nodes.slice(0, 3).map((n) => n.target.join(' ')) }));
-  }, WCAG_TAGS);
-}
-
-async function openStudio(page) {
-  const errors = [];
-  page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
-  await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible();
-  return errors;
-}
-
-const tokenBase = () => `http://127.0.0.1:${Number(process.env.GLADTALKER_E2E_PORT || 7863) + 1}`;
-
-/** Holds the next request matching `pattern` until the returned release() is called;
- * `release.reached` resolves once that request has arrived and is being held. Playwright tries
- * the most recently added matching route first, so add any fallback route for the same URL
- * *before* calling this. */
-async function hold(page, pattern, answer = (route) => route.continue()) {
-  let release;
-  let arrived;
-  const released = new Promise((r) => (release = r));
-  const reached = new Promise((r) => (arrived = r));
-  await page.route(pattern, async (route) => {
-    arrived();
-    await released;
-    await answer(route);
-  }, { times: 1 });
-  release.reached = reached;
-  return release;
-}
-
-/** A pretend render job `id`, so render bookkeeping can be tested without minutes of GPU time.
- * The WebSocket ticket is refused, so the UI follows it by polling `snapshot()`. */
-async function fakeRender(page, id, snapshot) {
-  await page.route(`**/jobs/${id}/ws-ticket`, (route) => route.fulfill({ status: 503, json: { detail: 'busy' } }));
-  await page.route(`**/jobs/${id}`, (route) => route.fulfill({ json: snapshot() }));
-}
-
-const renderSnapshot = (id, state, extra = {}) => ({ id, kind: 'render', title: 'Render (Ann)', state, progress: state === 'succeeded' ? 1 : 0.2,
-  message: state === 'succeeded' ? 'Done' : 'Rendering Ann: animating frame 5 of 50', stage: 'render:Ann',
-  stages: ['audio', 'render:Ann', 'compose'], cancel_requested: false, eta_s: null, elapsed_s: 3, ...extra });
-
-async function readyToRoll(page, script = 'Ann: Hello there.') {
-  await castPortrait(page);
-  await page.getByRole('button', { name: 'Next: Script' }).click();
-  await page.getByLabel('Paste a script').fill(script);
-  await page.getByRole('button', { name: 'Import', exact: true }).click();
-  await page.getByRole('button', { name: 'Next: Roll' }).click();
-  await expect(page.getByText(/Everything is ready/)).toBeVisible();
-}
-
-const SRT = ['1', '00:00:00,000 --> 00:00:02,000', 'Ann: Hello there.', ''].join('\n');
-const VTT = ['WEBVTT', '', '00:00.000 --> 00:02.000', 'Ann: Hello there.', ''].join('\n');
-
-const savedProject = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('gladtalker.project.v1')));
-
-async function castPortrait(page) {
-  await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
-  await expect(page.getByRole('img', { name: /Scene: people_0\.png/ })).toBeVisible();
-  await page.getByRole('button', { name: /Auto-Detect Cast/ }).click();
-  await expect(page.getByRole('group', { name: /Cast member 1/ })).toBeVisible();
-  const name = page.getByLabel('Name', { exact: true });
-  await name.fill('Ann');
-}
+import { PORTRAIT, axeViolations, openStudio, tokenBase, hold, fakeRender, renderSnapshot, readyToRoll, SRT, VTT, savedProject, castPortrait } from './helpers.js';
 
 test.describe('axe-core scans', () => {
   // The engine's Content-Security-Policy (correctly) blocks injected scripts; only the scan needs
@@ -187,6 +108,7 @@ test('a slow import never lands in a project opened meanwhile', async ({ page })
   await page.getByRole('button', { name: 'Import', exact: true }).click();
 
   // While project A's import is still waiting for the engine, open project B.
+  page.once('dialog', (dialog) => dialog.accept()); // "Open …? It replaces the current cast and script."
   const chooser = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'Open…' }).click();
   await (await chooser).setFiles({ name: 'b.gladtalker.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
@@ -331,6 +253,7 @@ test('a project file never contains a saved job id it shouldn’t follow, or lin
   // Opening a project with a forged job reference makes no job request.
   const jobRequests = [];
   page.on('request', (r) => { if (/\/jobs\//.test(r.url())) jobRequests.push(r.url()); });
+  page.once('dialog', (dialog) => dialog.accept()); // "Open …? It replaces the current cast and script."
   const chooser = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'Open…' }).click();
   await (await chooser).setFiles({ name: 'forged.gladtalker.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
@@ -399,6 +322,27 @@ test('token mode: a caption download failure still shows the video, and captions
   await expect(page.getByRole('link', { name: 'Download captions (SRT)' })).toHaveAttribute('download', 'Ann_scene.srt');
   await expect(page.locator('video track[kind="captions"]')).toHaveCount(1);
   await expect(page.getByText(/captions couldn’t be loaded/)).toHaveCount(0);
+});
+
+test('a second image dropped while one is uploading is turned away, so an older upload can’t replace a newer scene', async ({ page }) => {
+  await openStudio(page);
+  const uploads = [];
+  page.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/uploads')) uploads.push(r.url()); });
+  const release = await hold(page, '**/uploads');
+  await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
+  await release.reached; // the first upload is waiting for the engine
+  // Drop a second image on the drop zone.
+  await page.locator('.drop').evaluate((zone) => {
+    const data = new DataTransfer();
+    data.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'second.png', { type: 'image/png' }));
+    zone.dispatchEvent(new DragEvent('drop', { dataTransfer: data, bubbles: true, cancelable: true }));
+  });
+  await expect(page.locator('[role="status"][aria-live="polite"]').last()).toHaveText(/Still uploading the previous image/);
+  release();
+  await expect(page.getByRole('img', { name: /Scene: people_0\.png/ })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(uploads).toHaveLength(1);
+  expect((await savedProject(page)).image.name).toBe('people_0.png');
 });
 
 test('help dialog: Esc closes it and focus returns to Help', async ({ page }) => {

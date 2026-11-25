@@ -14,7 +14,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "e2e:desktop": "playwright test --config playwright.desktop.config.js"
+    "e2e:desktop": "playwright test --config playwright.desktop.config.js",
+    "e2e:desktop:interactive": "playwright test --config playwright.desktop.interactive.config.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",

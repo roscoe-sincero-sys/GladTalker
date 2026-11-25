@@ -51,8 +51,14 @@
   });
 
   async function chooseFile(file) {
-    fileError = '';
     if (!file) return;
+    // One upload at a time, from the picker or a drop: a second one could finish first and then
+    // be overwritten by the older answer.
+    if (uploading) {
+      announce('Still uploading the previous image. Try again when it has finished.');
+      return;
+    }
+    fileError = '';
     if (!/^image\/(png|jpeg|bmp|webp)$/.test(file.type) && !/\.(png|jpe?g|bmp|webp)$/i.test(file.name)) {
       fileError = `“${file.name}” isn’t a supported image. Use PNG, JPEG, BMP, or WebP.`;
       return;
@@ -77,6 +83,7 @@
   }
 
   async function autoCast() {
+    if (detecting) return;
     detecting = true;
     const current = projectGuard();
     const imagePath = project.image.path;
@@ -154,7 +161,8 @@
           <label for="scene-file">{project.image ? 'Replace the scene image' : 'Scene image'}</label>
           <input id="scene-file" type="file" accept="image/png,image/jpeg,image/bmp,image/webp"
             aria-describedby="scene-file-hint{fileError ? ' scene-file-error' : ''}" aria-invalid={fileError ? 'true' : undefined}
-            disabled={uploading} onchange={(e) => chooseFile(e.currentTarget.files?.[0])} />
+            aria-disabled={uploading ? 'true' : undefined} onclick={(e) => { if (uploading) e.preventDefault(); }}
+            onchange={(e) => chooseFile(e.currentTarget.files?.[0])} />
           <p class="hint" id="scene-file-hint">A portrait, a video-call screenshot, or a comic panel. PNG, JPEG, BMP, or WebP, up to 50 MB. You can also drop the file here.</p>
           {#if uploading}<p class="muted" role="status">Uploading…</p>{/if}
           {#if fileError}<p class="error-text" id="scene-file-error">{fileError}</p>{/if}
@@ -176,10 +184,10 @@
               <option value="0.05">Very sensitive</option>
             </select>
           </div>
-          <button type="button" id="auto-cast" class="primary" onclick={autoCast} disabled={detecting}>
+          <button type="button" id="auto-cast" class="primary" onclick={autoCast} aria-disabled={detecting ? 'true' : undefined}>
             <span aria-hidden="true">✨</span> {detecting ? 'Detecting…' : 'Auto-Detect Cast'}
           </button>
-          <button type="button" onclick={addRegion} disabled={castFull}
+          <button type="button" onclick={addRegion} aria-disabled={castFull ? 'true' : undefined}
             aria-describedby={castFull ? 'cast-full' : undefined}>+ Add region</button>
         </div>
         {#if castFull}

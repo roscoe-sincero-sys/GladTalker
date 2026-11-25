@@ -26,11 +26,39 @@ describe('NumberField', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Increase Pitch' }));
     expect(onchange).toHaveBeenLastCalledWith(6);
     expect(input.value).toBe('6');
-    expect(screen.getByRole('button', { name: 'Increase Pitch' }).disabled).toBe(true);
+    // At the limit it is unavailable but keeps focus (aria-disabled, not disabled), and does nothing.
+    const increase = screen.getByRole('button', { name: 'Increase Pitch' });
+    expect(increase.getAttribute('aria-disabled')).toBe('true');
+    expect(increase.disabled).toBe(false);
+    increase.focus();
+    const calls = onchange.mock.calls.length;
+    await fireEvent.click(increase);
+    await fireEvent.click(increase);
+    expect(onchange.mock.calls.length, 'an unavailable button changes nothing').toBe(calls);
+    expect(input.value).toBe('6');
+    expect(document.activeElement).toBe(increase);
     input.value = '-20';
     await fireEvent.change(input);
     expect(onchange).toHaveBeenLastCalledWith(-6);
+    const decrease = screen.getByRole('button', { name: 'Decrease Pitch' });
+    expect(decrease.getAttribute('aria-disabled')).toBe('true');
+    const atMin = onchange.mock.calls.length;
+    await fireEvent.click(decrease);
+    expect(onchange.mock.calls.length).toBe(atMin);
     expect(await violations(container)).toEqual([]);
+  });
+
+  it('leaves a value from outside its range alone when the unavailable button is pressed', async () => {
+    // A project saved elsewhere with pitch 7 (the range is −6…6): Increase is unavailable and
+    // must not "fix" the value to 6 behind the user's back; Decrease works.
+    const onchange = vi.fn();
+    render(NumberField, { id: 'pitch2', label: 'Pitch', value: 7, min: -6, max: 6, step: 0.5, onchange });
+    const increase = screen.getByRole('button', { name: 'Increase Pitch' });
+    expect(increase.getAttribute('aria-disabled')).toBe('true');
+    await fireEvent.click(increase);
+    expect(onchange).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Decrease Pitch' }));
+    expect(onchange).toHaveBeenLastCalledWith(6);
   });
 
   it('links hints and errors to the input (aria-describedby / aria-invalid)', () => {

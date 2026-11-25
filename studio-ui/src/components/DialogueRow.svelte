@@ -42,7 +42,8 @@
         aria-describedby={[textError && `text-error-${line.id}`, warnings.length && `warn-${line.id}`].filter(Boolean).join(' ') || undefined} />
     </div>
     <div class="buttons" role="group" aria-label="Line {n} actions">
-      <button type="button" onclick={() => onplay(line)} disabled={!speaker || !line.text.trim() || playing}
+      <button type="button" onclick={() => { if (!playing) onplay(line); }} disabled={!speaker || !line.text.trim()}
+        aria-disabled={playing ? 'true' : undefined}
         aria-label="Play line {n}">▶ <span class="word">{playing ? '…' : 'Play'}</span></button>
       <button type="button" id="up-{line.id}" onclick={() => onmove(index, -1)} disabled={index === 0} aria-label="Move line {n} up"
         aria-keyshortcuts="Alt+ArrowUp">↑ <span class="word">Up</span></button>

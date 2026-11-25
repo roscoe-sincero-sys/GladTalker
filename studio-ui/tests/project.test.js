@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultProject, normalizeProject, loadProject, saveProject, renderRequest, audioPreviewRequest,
-  nextStyleIndex, STORAGE_KEY, PROJECT_VERSION, projectGuard, replaceProject, MAX_CAST, previewDigest,
+  nextStyleIndex, STORAGE_KEY, PROJECT_VERSION, projectGuard, replaceProject, MAX_CAST, previewDigest, hasWork,
 } from '../src/lib/project.svelte.js';
 import { renderProblems, problemsForStep, audioProblems } from '../src/lib/validate.js';
 import { moveLine, linesFromParse, nameKey } from '../src/lib/script-lines.js';
@@ -178,5 +178,22 @@ describe('formatting', () => {
     expect(pacingLabel(1)).toBe('1.00× (Natural)');
     expect(pacingLabel(1.082)).toBe('1.08× (Slightly faster)');
     expect(timestamp(61_500)).toBe('1:01.5');
+  });
+});
+
+describe('hasWork (asked before New or Open replaces a project)', () => {
+  it('counts a scene, cast, script, or any changed setting, but not bookkeeping alone', () => {
+    expect(hasWork(defaultProject())).toBe(false);
+    expect(hasWork(normalizeProject(JSON.parse(JSON.stringify(defaultProject()))))).toBe(false); // a saved blank project
+    expect(hasWork({ ...defaultProject(), image: IMAGE })).toBe(true); // a scene and nothing else
+    expect(hasWork(sample())).toBe(true);
+    expect(hasWork({ ...defaultProject(), output: { ...defaultProject().output, preset: 'vertical1080' } })).toBe(true);
+    expect(hasWork({ ...defaultProject(), pacing: { ...defaultProject().pacing, gapMs: 500 } })).toBe(true);
+    expect(hasWork({ ...defaultProject(), captions: false })).toBe(true);
+    expect(hasWork({ ...defaultProject(), quality: { mode: 'enhanced' } })).toBe(true);
+    // Key order doesn't matter, and nothing else counts on its own.
+    const reordered = { ...defaultProject(), output: { fit: 'fit', filename: '', background: '#ffffff', preset: 'hd720' } };
+    expect(hasWork(reordered)).toBe(false);
+    expect(hasWork({ ...defaultProject(), lastRenderJobId: '0123456789ab', detections: [{ x: 1 }] })).toBe(false);
   });
 });
