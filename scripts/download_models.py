@@ -7,9 +7,11 @@ using only the Python standard library (no wget required).
 
 import argparse
 import hashlib
+import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -97,11 +99,83 @@ def expected_for(rel_path: str) -> Optional[tuple[int, str]]:
 
 
 def is_complete(dest: Path, expected: Optional[tuple[int, str]]) -> bool:
-    """Cheap readiness check: the file exists and (when pinned) has the expected size."""
+    """Size-only pre-check: the file exists and (when pinned) has the expected size.
+    Use is_verified() to decide whether a file is actually usable."""
     dest = Path(dest)
     if not dest.is_file():
         return False
     return expected is None or dest.stat().st_size == expected[0]
+
+
+# SHA-256 results are cached per directory, keyed by file size + modification time, so readiness
+# checks hash each model once rather than on every status poll. Like git's "racy clean" rule, an
+# entry is only trusted if the file was last modified comfortably *before* it was hashed: two
+# writes inside one filesystem timestamp tick share an mtime, so a fresher file is re-hashed.
+VERIFY_CACHE_NAME = ".gladtalker_verified.json"
+RACY_WINDOW_NS = 2_000_000_000
+_cache_lock = threading.Lock()
+
+
+def _cache_path(directory: Path) -> Path:
+    return Path(directory) / VERIFY_CACHE_NAME
+
+
+def _load_cache(directory: Path) -> dict:
+    try:
+        with open(_cache_path(directory), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_digest(dest: Path, digest: str) -> None:
+    """Remember ``dest``'s digest for its current size/mtime (best effort)."""
+    dest = Path(dest)
+    try:
+        st = dest.stat()
+        with _cache_lock:
+            cache = _load_cache(dest.parent)
+            cache[dest.name] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha256": digest,
+                                "verified_at_ns": time.time_ns()}
+            fd, tmp = tempfile.mkstemp(prefix=VERIFY_CACHE_NAME + ".", dir=dest.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=1, sort_keys=True)
+            os.replace(tmp, _cache_path(dest.parent))
+    except OSError:
+        pass  # a read-only model folder just means we re-hash next time
+
+
+def file_digest(dest: Path, use_cache: bool = True) -> str:
+    dest = Path(dest)
+    st = dest.stat()
+    if use_cache:
+        entry = _load_cache(dest.parent).get(dest.name)
+        if (entry and entry.get("size") == st.st_size and entry.get("mtime_ns") == st.st_mtime_ns
+                and st.st_mtime_ns < entry.get("verified_at_ns", 0) - RACY_WINDOW_NS):
+            return entry["sha256"]
+    digest = sha256_file(dest)
+    _record_digest(dest, digest)
+    return digest
+
+
+def is_verified(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool = True) -> bool:
+    """True if ``dest`` exists with the pinned size *and* SHA-256 (no pin: it just exists).
+    A same-size file with damaged contents is not verified."""
+    if not is_complete(dest, expected):
+        return False
+    if expected is None:
+        return True
+    return file_digest(dest, use_cache=use_cache) == expected[1]
+
+
+def _verified_quietly(dest: Path, expected: tuple[int, str]) -> bool:
+    """Fresh (uncached) verification that treats "file busy" as not verified yet: on Windows the
+    destination can't be opened while another writer is mid-replace."""
+    try:
+        return is_verified(dest, expected, use_cache=False)
+    except OSError:
+        return False
 
 
 def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], attempts: int = 10) -> None:
@@ -109,14 +183,18 @@ def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], at
 
     On Windows, replacing a file that another process (e.g. a second downloader that finished at
     the same moment) is replacing or reading fails with PermissionError. If the destination is
-    already complete, the other writer won and our copy is redundant; otherwise retry briefly.
+    already fully verified (size and checksum, freshly hashed), the other writer won and our copy
+    is redundant; otherwise retry briefly and finally raise, so a damaged file that cannot be
+    replaced is never reported as repaired.
     """
     for attempt in range(attempts):
         try:
             os.replace(tmp_path, dest)
+            if expected is not None:
+                _record_digest(dest, expected[1])  # just verified; spare the next readiness check
             return
         except PermissionError:
-            if expected is not None and is_complete(dest, expected):
+            if expected is not None and _verified_quietly(dest, expected):
                 tmp_path.unlink(missing_ok=True)
                 return
             if attempt == attempts - 1:
@@ -135,7 +213,7 @@ def download_file(
 
     The file is only moved into place after its length matches ``Content-Length`` and, when
     ``expected=(size, sha256)`` is given, its size and SHA-256 match too. An existing ``dest``
-    is skipped only if it is complete (so truncated files from older runs are repaired).
+    is skipped only if it verifies (so truncated or damaged files from older runs are repaired).
 
     Args:
         progress: Optional callback ``progress(downloaded_bytes, total_bytes_or_None)`` invoked
@@ -143,12 +221,12 @@ def download_file(
             may raise to abort the download; the partial file is removed.
     """
     dest = Path(dest)
-    if not force and is_complete(dest, expected):
+    if not force and is_verified(dest, expected):
         if progress is None:
-            print(f"[skip] {dest} ({_format_bytes(dest.stat().st_size)})")
+            print(f"[skip] {dest} ({_format_bytes(dest.stat().st_size)}, verified)")
         return
     if dest.exists() and not force and progress is None:
-        print(f"[repair] {dest} is incomplete ({_format_bytes(dest.stat().st_size)}); downloading again")
+        print(f"[repair] {dest} is incomplete or damaged; downloading again")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     # A unique temp name means two concurrent downloaders can never write the same partial file.

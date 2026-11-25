@@ -116,6 +116,9 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
         sys.path.insert(0, str(REPO_ROOT))
     # SadTalker and facexlib resolve weights relative to the working directory.
     os.chdir(REPO_ROOT)
+    from src.utils.safe_io import sync_imageio_ffmpeg
+
+    sync_imageio_ffmpeg()  # one FFmpeg for Studio, SadTalker's muxing, and ImageIO's writers
     services = services or StudioServices.default(config)
     workspace = Path(config.workspace)
 

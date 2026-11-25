@@ -85,6 +85,14 @@ class StudioServerTests(unittest.TestCase):
         self.jobs.shutdown()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_app_points_imageio_at_ffmpeg_override(self):
+        import os
+
+        with mock.patch.dict(os.environ, {"GLADTALKER_FFMPEG": "Z:/tools/ffmpeg.exe"}):
+            os.environ.pop("IMAGEIO_FFMPEG_EXE", None)
+            create_app(StudioConfig(workspace=self.tmp / "ws4"), self.services)
+            self.assertEqual(os.environ.get("IMAGEIO_FFMPEG_EXE"), "Z:/tools/ffmpeg.exe")
+
     # -- basic endpoints ---------------------------------------------------------------------
     def test_health_and_voices(self):
         self.assertEqual(self.client.get("/health").json()["status"], "ok")

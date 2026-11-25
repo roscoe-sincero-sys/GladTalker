@@ -31,6 +31,34 @@ class SecurityHelperTests(unittest.TestCase):
         self.assertNotIn("SECRET", "\n".join(logs.output))
         self.assertIn("ticket=[redacted]", "\n".join(logs.output))
 
+    def test_access_log_redaction_keeps_uvicorn_formatter_working(self):
+        import io
+
+        from uvicorn.logging import AccessFormatter
+
+        install_log_redaction()
+        logger = logging.getLogger("uvicorn.access")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s',
+                                             use_colors=False))
+        logger.addHandler(handler)
+        old_level, old_propagate = logger.level, logger.propagate
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        try:
+            # Exactly how uvicorn's HTTP protocol logs an access line: five positional args.
+            logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5", "GET",
+                        "/jobs/abc/files/video?token=SECRET", "1.1", 200)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+            logger.propagate = old_propagate
+        line = stream.getvalue()
+        self.assertNotIn("SECRET", line)
+        self.assertIn('"GET /jobs/abc/files/video?token=[redacted] HTTP/1.1" 200', line)
+        self.assertNotIn("Logging error", line)
+
     def test_origin_rules(self):
         allowed = ["tauri://localhost"]
         self.assertTrue(origin_allowed(None, "127.0.0.1:7860", allowed))
@@ -98,6 +126,25 @@ class MemoryBudgetTests(unittest.TestCase):
     def test_normal_parts_allowed(self):
         check_memory_budget({"Brain": 591, "Pinky": 388}, 256, available_bytes=8 * self.GIB)  # the 42s scene
         check_memory_budget({}, 512, available_bytes=1)
+
+    def test_tile_buffers_counted_at_full_resolution(self):
+        base = estimate_render_bytes(100, 256)
+        self.assertEqual(estimate_render_bytes(100, 256, 1920, 1080), base + 1920 * 1080 * 3 * 4)
+        # Enhancement adds GFPGAN's input and its 2x output (4x the pixels) per in-flight frame.
+        self.assertEqual(estimate_render_bytes(100, 256, 1920, 1080, enhanced=True), base + 1920 * 1080 * 3 * 9)
+
+    def test_full_hd_enhanced_tile_streams_so_length_does_not_multiply_tile_cost(self):
+        # 60 s of a Full HD tile, enhanced, at 256 px: the frames are streamed through GFPGAN, so
+        # only the 256 px render buffers scale with length (~3.3 GiB), not the 1080p frames.
+        check_memory_budget({"Brain": (1500, 1920, 1080)}, 256, available_bytes=8 * self.GIB, enhanced=True)
+        # The same part at 512 px does not fit, and the advice mentions both levers.
+        with self.assertRaisesRegex(UserFacingError, r"Brain speaks for 60s.*256 px.*Standard instead of Enhanced"):
+            check_memory_budget({"Brain": (1500, 1920, 1080)}, 512, available_bytes=8 * self.GIB, enhanced=True)
+
+    def test_huge_tile_alone_can_exceed_budget(self):
+        with self.assertRaisesRegex(UserFacingError, "Giant"):
+            check_memory_budget({"Tiny": (10, 64, 64), "Giant": (10, 12000, 12000)}, 256,
+                                available_bytes=2 * self.GIB, enhanced=True)
 
 
 class LauncherTests(unittest.TestCase):

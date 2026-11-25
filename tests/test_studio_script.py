@@ -53,6 +53,38 @@ class ParseScriptTests(unittest.TestCase):
         r = parse_script("11:17 AM is the time.")
         self.assertIsNone(r.lines[0].speaker)
 
+    def test_long_cast_names_are_recognised(self):
+        cast = ["Alice", "The Man in the Hat"]
+        r = parse_script("Alice: Who are you?\nThe Man in the Hat: Nobody.\n"
+                         "- **the  man in the hat** (quietly): Shh.", cast=cast)
+        self.assertEqual([(l.speaker, l.text) for l in r.lines], [
+            ("Alice", "Who are you?"), ("The Man in the Hat", "Nobody."), ("The Man in the Hat", "Shh."),
+        ])
+        self.assertEqual(r.lines[2].note, "quietly")
+        self.assertEqual(r.unknown_speakers, [])
+
+    def test_longest_cast_name_wins(self):
+        r = parse_script("Al Bundy: Hi.\nAl: Hey.", cast=["Al", "Al Bundy"])
+        self.assertEqual([l.speaker for l in r.lines], ["Al Bundy", "Al"])
+
+    def test_parsed_script_is_accepted_by_render(self):
+        """Contract: whatever /script/parse returns for a valid cast must validate in /render/start
+        with each line attributed to the right cast member."""
+        from src.studio.schemas import MAX_CAST, RenderRequest
+
+        names = ["Alice", "The Man in the Hat", "Dr. Jean-Luc O’Brien the Third of Many"]
+        self.assertLessEqual(len(names), MAX_CAST)
+        text = "\n".join(f"{n.upper()}: Line {i}." for i, n in enumerate(names))
+        parsed = parse_script(text, cast=names)
+        self.assertEqual(parsed.unknown_speakers, [])
+        req = RenderRequest.model_validate({
+            "image_path": "scene.png",
+            "cast": [{"name": n, "region": {"x": 0, "y": 0, "w": 64, "h": 64}} for n in names],
+            "script": [{"speaker": l.speaker, "text": l.text} for l in parsed.lines],
+        })
+        self.assertEqual([(l.speaker, l.text) for l in req.script],
+                         [(n, f"Line {i}.") for i, n in enumerate(names)])
+
     def test_to_dict_shape(self):
         d = parse_script("Brain: You're clicking it wrong.").to_dict()
         self.assertEqual(d["line_count"], 1)

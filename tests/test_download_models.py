@@ -1,8 +1,10 @@
 import hashlib
 import io
+import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -99,9 +101,10 @@ class DownloadFileTests(unittest.TestCase):
 
         def recording_mkstemp(*a, **kw):
             fd, name = real_mkstemp(*a, **kw)
-            temps.append(name)
-            if len(temps) == 2:
-                gate.set()
+            if name.endswith(".part"):  # ignore the digest cache's own atomic-write temp files
+                temps.append(name)
+                if len(temps) == 2:
+                    gate.set()
             return fd, name
 
         errors = []
@@ -125,6 +128,107 @@ class DownloadFileTests(unittest.TestCase):
         self.assertEqual(len(set(temps)), 2)
         self.assertEqual(self.dest.read_bytes(), self.data)
         self.assertEqual(self._leftovers(), [])
+
+
+class ChecksumReadinessTests(unittest.TestCase):
+    """Same-size files with damaged contents must never count as ready, skipped, or repaired."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="gladtalker_verify_"))
+        self.dest = self.dir / "model.pth"
+        self.data = b"good-model" * 100
+        self.expected = (len(self.data), hashlib.sha256(self.data).hexdigest())
+        self.damaged = b"X" + self.data[1:]  # same size, different bytes
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_same_size_damage_is_not_verified(self):
+        self.dest.write_bytes(self.damaged)
+        self.assertTrue(dm.is_complete(self.dest, self.expected), "size alone looks fine")
+        self.assertFalse(dm.is_verified(self.dest, self.expected))
+        self.dest.write_bytes(self.data)
+        self.assertTrue(dm.is_verified(self.dest, self.expected))
+
+    def _age(self, seconds):
+        past = time.time_ns() - int(seconds * 1e9)
+        os.utime(self.dest, ns=(past, past))
+
+    def test_digest_cache_hashes_once_and_invalidates_on_change(self):
+        self.dest.write_bytes(self.data)
+        self._age(60)  # an installed model, written long before it is checked
+        with mock.patch.object(dm, "sha256_file", wraps=dm.sha256_file) as hasher:
+            self.assertTrue(dm.is_verified(self.dest, self.expected))
+            self.assertTrue(dm.is_verified(self.dest, self.expected))
+            self.assertEqual(hasher.call_count, 1, "second check must come from the cache")
+            self.dest.write_bytes(self.damaged)
+            self._age(30)  # rewritten: different mtime invalidates the cache entry
+            self.assertFalse(dm.is_verified(self.dest, self.expected))
+            self.assertEqual(hasher.call_count, 2)
+
+    def test_racy_same_mtime_rewrite_is_still_detected(self):
+        self.dest.write_bytes(self.data)
+        stamp = time.time_ns()
+        os.utime(self.dest, ns=(stamp, stamp))
+        self.assertTrue(dm.is_verified(self.dest, self.expected))
+        # Same-size corruption that lands on the *same* mtime (one timestamp tick) must not be
+        # served from the cache.
+        self.dest.write_bytes(self.damaged)
+        os.utime(self.dest, ns=(stamp, stamp))
+        self.assertFalse(dm.is_verified(self.dest, self.expected))
+
+    def test_same_size_damaged_file_is_repaired_not_skipped(self):
+        self.dest.write_bytes(self.damaged)
+        with mock.patch.object(dm.urllib.request, "urlopen",
+                               return_value=FakeResponse(self.data, len(self.data))) as urlopen:
+            dm.download_file("https://example.invalid/m", self.dest, progress=lambda d, t: None,
+                             expected=self.expected)
+        urlopen.assert_called_once()
+        self.assertEqual(self.dest.read_bytes(), self.data)
+        self.assertTrue(dm.is_verified(self.dest, self.expected))
+
+    def test_locked_damaged_destination_is_not_reported_repaired(self):
+        self.dest.write_bytes(self.damaged)
+        with mock.patch.object(dm.urllib.request, "urlopen",
+                               return_value=FakeResponse(self.data, len(self.data))), \
+                mock.patch.object(dm.os, "replace", side_effect=PermissionError(13, "Access is denied")), \
+                mock.patch.object(dm.time, "sleep"):
+            with self.assertRaises(PermissionError):
+                dm.download_file("https://example.invalid/m", self.dest, progress=lambda d, t: None,
+                                 expected=self.expected)
+        self.assertEqual(self.dest.read_bytes(), self.damaged, "damaged file is still there")
+        self.assertEqual([p.name for p in self.dir.iterdir() if p.suffix == ".part"], [])
+
+    def test_locked_destination_accepted_only_when_another_writer_verified_it(self):
+        self.dest.write_bytes(self.data)  # a concurrent downloader already published good bytes
+        os.utime(self.dest, ns=(time.time_ns(), time.time_ns()))
+        with mock.patch.object(dm.urllib.request, "urlopen",
+                               return_value=FakeResponse(self.data, len(self.data))), \
+                mock.patch.object(dm.os, "replace", side_effect=PermissionError(13, "Access is denied")), \
+                mock.patch.object(dm.time, "sleep"):
+            dm.download_file("https://example.invalid/m", self.dest, force=True, progress=lambda d, t: None,
+                             expected=self.expected)
+        self.assertEqual(self.dest.read_bytes(), self.data)
+
+    def test_status_and_render_precheck_reject_same_size_damage(self):
+        from src.studio.jobs import UserFacingError
+        from src.studio.pipeline import check_models
+
+        rel = "checkpoints/SadTalker_V0.0.2_256.safetensors"
+        pins = {}
+        for model_rel, _ in dm.MODELS:
+            path = self.dir / model_rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self.data)
+            pins[model_rel] = self.expected
+        (self.dir / rel).write_bytes(self.damaged)
+        with mock.patch.dict(dm.MODEL_CHECKSUMS, pins):
+            status = models_status(self.dir)
+            entry = next(f for f in status["files"] if f["path"] == rel)
+            self.assertEqual((entry["ready"], entry["damaged"], entry["incomplete"]), (False, True, False))
+            self.assertEqual(status["ready"], 7)
+            with self.assertRaisesRegex(UserFacingError, "damaged: SadTalker_V0.0.2_256.safetensors"):
+                check_models(self.dir)
 
 
 class ManifestTests(unittest.TestCase):

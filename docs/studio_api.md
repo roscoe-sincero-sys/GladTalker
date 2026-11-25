@@ -35,12 +35,12 @@ The engine reads image paths, writes files, and starts downloads on your machine
 | :--- | :--- | :--- |
 | `GET` | `/health` | Liveness and version (no token needed). |
 | `GET` | `/hardware` | Selected device (e.g. `DirectML:0 (AMD Radeon(TM) RX 6550M)`), every detected GPU, FFmpeg, model readiness, active jobs. |
-| `GET` | `/models` | Status of the 8 pretrained files. A file is `ready` only if it has its pinned size; truncated files show `incomplete: true`. |
-| `POST` | `/models/download` | Starts a download job, or returns the one already running. Missing and incomplete files are fetched and checked against pinned sizes and SHA-256 digests before they replace anything. Body: `{"force": false}`. |
+| `GET` | `/models` | Status of the 8 pretrained files. A file is `ready` only if its size **and SHA-256** match the pinned values. Truncated files show `incomplete: true`; same-size files with bad contents show `damaged: true`. Each file is hashed once (the result is cached against its size and modification time), so polling is cheap. |
+| `POST` | `/models/download` | Starts a download job, or returns the one already running. Missing, incomplete, and damaged files are fetched and checked against pinned sizes and SHA-256 digests before they replace anything. The pins were confirmed by a fresh download of all eight files from their upstream release URLs. Body: `{"force": false}`. |
 | `GET` | `/voices` | Voice presets: Neutral 0, Authoritative −1.5, Warm −0.5, Nervous +2.5 semitones (range −6…+6). |
 | `POST` | `/uploads` | Multipart `file` upload for `--web` mode. Returns `{image_path, width, height}`. |
 | `POST` | `/cast/detect` | `{image_path, min_confidence=0.2, max_faces=8}` → faces in reading order with a suggested `region` each. |
-| `POST` | `/script/parse` | `{text, cast: [names]}` → dialogue lines, speakers, unknown speakers, lint warnings with an optional `fix`. |
+| `POST` | `/script/parse` | `{text, cast: [names]}` → dialogue lines, speakers, unknown speakers, lint warnings with an optional `fix`. Names from `cast` are recognised at any length and in any letter case. Without a cast, names of up to four words are detected. |
 | `POST` | `/tts/preview` | `{text, semitones=0, tempo=1}` → `audio/wav` (16 kHz mono). |
 | `POST` | `/render/start` | Render request (see below) → `202` job snapshot. |
 | `GET` | `/jobs`, `/jobs/{id}` | Job snapshots. |
@@ -86,7 +86,7 @@ On a 977×580 four-person video-call screenshot with illustrated characters, det
 - `quality.mode: "enhanced"` adds GFPGAN face restoration, which is much slower: about +2.6 s per frame on DirectML.
 - Speakers are matched to cast names case-insensitively. Characters with no lines stay static.
 - With a target duration, lines may play up to 2× faster to fit. If the script still doesn't fit, the job fails and the message says the shortest target that would work.
-- **Memory:** SadTalker keeps a character's whole speaking part in RAM while rendering (about 2.3 MB per frame at 256 px and 9.4 MB at 512 px, at peak). Before rendering, the engine checks the longest part against free memory and fails early with a suggestion to shorten or split the scene instead of exhausting RAM.
+- **Memory:** SadTalker keeps a character's whole speaking part in RAM while rendering (about 2.3 MB per frame at 256 px and 9.4 MB at 512 px, at peak). Paste-back and GFPGAN enhancement stream one frame at a time, so the tile's full resolution only adds a fixed amount. Before rendering, the engine checks the most demanding part against free memory and fails early with suggestions (shorten or split the scene, use 256 px, use Standard) instead of exhausting RAM.
 
 The job's `result` holds `video_path`, `srt_path`, `vtt_path`, `width`, `height`, `duration_s`, `frames`, `tempo`, `speaker_frames`, `timings`, and the caption cues. Each render folder also holds `project.json` (the request) and `result.json`.
 
@@ -147,7 +147,7 @@ Measured on an AMD Radeon RX 6550M (DirectML), a two-character, three-line scene
 ## Notes and limits (phase 1)
 
 - Set `GLADTALKER_KEEP_WORK=1` to keep intermediate files (tiles, TTS lines, per-character SadTalker videos) in each render's `work/` folder.
-- `GLADTALKER_FFMPEG` / `GLADTALKER_FFPROBE` override FFmpeg discovery. The override covers every FFmpeg call, including SadTalker's internal muxing.
+- `GLADTALKER_FFMPEG` / `GLADTALKER_FFPROBE` override FFmpeg discovery. The override covers every FFmpeg call, including SadTalker's internal muxing and ImageIO's intermediate video writers (an explicit `IMAGEIO_FFMPEG_EXE` takes precedence for ImageIO).
 - The first voice preview or render downloads the coqui-tts `tacotron2-DDC` voice (about 100 MB) into the coqui cache.
 - Model download progress is reported per file. An interrupted download restarts that file; it does not resume.
 - Verified on DirectML (AMD) and CPU. CUDA, ROCm, and MPS use the same code paths but haven't been exercised on real hardware yet.

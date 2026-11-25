@@ -26,23 +26,28 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - WebSockets authenticate with single-use, job-scoped tickets (`POST /jobs/{id}/ws-ticket`), and `token=`/`ticket=` values are redacted from server logs.
   - A memory-budget check refuses renders whose longest speaking part would not fit in RAM, with guidance on what to change.
   - The sidecar prints its `listening` line only once uvicorn is accepting connections.
-- `scripts/download_models.py`: pinned size + SHA-256 for every model.
+- `scripts/download_models.py`: pinned size + SHA-256 for every model, confirmed against a fresh download of all eight upstream assets.
   - Downloads use unique temp files and are verified (length and checksum) before replacing anything.
-  - Truncated files are reported as incomplete and repaired on the next run.
+  - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached by size + mtime, with a racy-timestamp guard.
+  - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (100 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (119 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.
 - `scripts/download_models.py`: `download_file()` accepts a `progress` callback and an `expected=(size, sha256)` check, and uses a 60 s network timeout.
 - `src/utils/videoio.save_video_with_watermark()` runs FFmpeg with an argument list, honours `GLADTALKER_FFMPEG`, raises on failure instead of continuing silently, and writes its temp file beside the output instead of the working directory.
 - `src/utils/paste_pic.py` writes its temp video beside the output and always releases and removes it, even when interrupted.
+- GFPGAN enhancement (`--enhancer gfpgan`) now streams frames from disk through the restorer into the writer, and SadTalker frees its render buffers once they're written. Previously `imageio.mimsave` rejected the generator, so the fallback held every 2×-upscaled frame in RAM. Its bare `except` also re-ran enhancement after any error.
+- When `GLADTALKER_FFMPEG` is set, Studio points ImageIO at the same FFmpeg (`IMAGEIO_FFMPEG_EXE`).
 - TTS contraction normalization moved to `src/utils/tts_text.py` (re-exported from `text2speech.py`) so it can be used without loading coqui-tts.
 - `requirements.txt`: added `fastapi`, `uvicorn`, `python-multipart`, and `websockets` for the Studio engine.
 
 ### Fixed
 - DirectML device names no longer include a trailing NUL character in `describe_device()`.
 - Renders no longer fail when the image or workspace path contains non-ASCII characters on Windows (`preprocess.py` and `paste_pic.py` now use Unicode-safe image I/O).
+- Log redaction keeps uvicorn's access-log arguments intact. Previously, redacting a request line broke the access formatter.
+- The script importer recognises cast names longer than four words, and `**Name** (note):` lines. Previously such lines were silently merged into the previous speaker's line.
 
 ---
 

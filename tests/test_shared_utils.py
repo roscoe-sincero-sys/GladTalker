@@ -22,7 +22,7 @@ REAL_FFMPEG = shutil.which("ffmpeg")
 def _write_video(path: str, frames: int = 3, size=(32, 32)) -> None:
     w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 25, size)
     for i in range(frames):
-        w.write(np.full((size[1], size[0], 3), 40 * i, np.uint8))
+        w.write(np.full((size[1], size[0], 3), (40 * i) % 256, np.uint8))
     w.release()
 
 
@@ -102,6 +102,92 @@ class MuxHelperTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GLADTALKER_FFMPEG": REAL_FFMPEG, "PATH": ""}):
             videoio.save_video_with_watermark(video, audio, out)
         self.assertGreater(os.path.getsize(out), 0)
+
+
+class ImageioFFmpegOverrideTests(unittest.TestCase):
+    @unittest.skipUnless(REAL_FFMPEG, "FFmpeg not installed")
+    def test_imageio_uses_override_when_its_own_discovery_fails(self):
+        import imageio
+        import imageio_ffmpeg
+        import imageio_ffmpeg._utils as discovery
+
+        out = os.path.join(tempfile.mkdtemp(prefix=UNICODE_PREFIX), "clip.mp4")
+        try:
+            with mock.patch.dict(os.environ, {"GLADTALKER_FFMPEG": REAL_FFMPEG}),                     mock.patch.object(discovery, "_get_ffmpeg_exe", return_value=None):
+                os.environ.pop("IMAGEIO_FFMPEG_EXE", None)
+                with self.assertRaises(RuntimeError):  # no bundled/conda/PATH binary to find
+                    imageio_ffmpeg.get_ffmpeg_exe()
+                safe_io.sync_imageio_ffmpeg()
+                self.assertEqual(imageio_ffmpeg.get_ffmpeg_exe(), REAL_FFMPEG)
+                imageio.mimsave(out, [np.zeros((32, 32, 3), np.uint8)] * 3, fps=25)  # SadTalker's call
+            self.assertGreater(os.path.getsize(out), 0)
+        finally:
+            shutil.rmtree(os.path.dirname(out), ignore_errors=True)
+
+    def test_explicit_imageio_setting_is_respected(self):
+        with mock.patch.dict(os.environ, {"GLADTALKER_FFMPEG": "A:/ours", "IMAGEIO_FFMPEG_EXE": "B:/theirs"}):
+            safe_io.sync_imageio_ffmpeg()
+            self.assertEqual(os.environ["IMAGEIO_FFMPEG_EXE"], "B:/theirs")
+
+
+class _FakeRestorer:
+    """Stands in for GFPGAN: returns the frame upscaled 2x, like the real restorer."""
+
+    def __init__(self, **kwargs):
+        pass
+
+    def enhance(self, img, has_aligned=False, only_center_face=False, paste_back=True):
+        return [], [], cv2.resize(img, (img.shape[1] * 2, img.shape[0] * 2))
+
+
+class EnhancerStreamingTests(unittest.TestCase):
+    """Enhanced renders must not hold every (2x upscaled) frame in RAM."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix=UNICODE_PREFIX)
+        self.video = os.path.join(self.dir, "full.mp4")
+        _write_video(self.video, frames=40, size=(320, 180))
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_frames_stream_through_enhancer_into_writer(self):
+        import tracemalloc
+
+        import imageio
+
+        from src.utils import face_enhancer
+
+        out = os.path.join(self.dir, "enhanced.mp4")
+        with mock.patch.object(face_enhancer, "SpandrelFaceRestorer", _FakeRestorer):
+            tracemalloc.start()
+            # Exactly the loop animate.py now runs for enhanced renders.
+            writer = imageio.get_writer(out, fps=25.0)
+            try:
+                for frame in face_enhancer.enhancer_generator_no_len(self.video, bg_upsampler=None):
+                    writer.append_data(frame)
+            finally:
+                writer.close()
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+        everything = 40 * (320 * 180 * 3 + 640 * 360 * 3)  # inputs + 2x outputs if materialized
+        self.assertLess(peak, everything / 4, f"peak {peak / 1e6:.1f} MB suggests frames were buffered")
+        cap = cv2.VideoCapture(out)
+        count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        ok, first = cap.read()
+        cap.release()
+        self.assertEqual(count, 40)
+        # 2x upscaled (imageio pads each dimension up to a multiple of 16: 360 -> 368)
+        self.assertEqual(first.shape[1], 640)
+        self.assertIn(first.shape[0], (360, 368))
+
+    def test_with_len_wrapper_reports_count_without_decoding(self):
+        from src.utils import face_enhancer
+
+        with mock.patch.object(face_enhancer, "SpandrelFaceRestorer", _FakeRestorer),                 mock.patch.object(face_enhancer, "load_video_to_cv2", side_effect=AssertionError("eager decode")):
+            gen = face_enhancer.enhancer_generator_with_len(self.video, bg_upsampler=None)
+            self.assertEqual(len(gen), 40)
+            self.assertEqual(sum(1 for _ in gen), 40)
 
 
 class PastePicCleanupTests(unittest.TestCase):

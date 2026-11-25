@@ -36,3 +36,12 @@ def imwrite(path, image) -> bool:
 def resolve_ffmpeg() -> str:
     """FFmpeg executable: ``GLADTALKER_FFMPEG`` if set, else ``ffmpeg`` from PATH."""
     return os.environ.get("GLADTALKER_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
+
+
+def sync_imageio_ffmpeg() -> None:
+    """Make ImageIO (used by SadTalker for intermediate videos) use the same FFmpeg as everything
+    else when ``GLADTALKER_FFMPEG`` is set. ImageIO otherwise discovers its own binary and ignores
+    our override. An explicit ``IMAGEIO_FFMPEG_EXE`` is left alone."""
+    override = os.environ.get("GLADTALKER_FFMPEG")
+    if override and not os.environ.get("IMAGEIO_FFMPEG_EXE"):
+        os.environ["IMAGEIO_FFMPEG_EXE"] = override

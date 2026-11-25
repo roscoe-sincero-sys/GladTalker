@@ -159,14 +159,23 @@ class TicketStore:
 
 
 class _RedactingFilter(logging.Filter):
+    """Redacts credentials inside the message *and each argument*, keeping ``record.args`` the
+    same shape: uvicorn's AccessFormatter unpacks exactly five positional args."""
+
+    @staticmethod
+    def _clean(value):
+        return redact(value) if isinstance(value, str) else value
+
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            message = record.getMessage()
+            if isinstance(record.msg, str):
+                record.msg = redact(record.msg)
+            if isinstance(record.args, tuple):
+                record.args = tuple(self._clean(a) for a in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: self._clean(v) for k, v in record.args.items()}
         except Exception:  # noqa: BLE001 - never break logging
-            return True
-        clean = redact(message)
-        if clean != message:
-            record.msg, record.args = clean, ()
+            pass
         return True
 
 

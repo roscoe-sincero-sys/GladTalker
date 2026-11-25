@@ -81,18 +81,35 @@ def resolve_path(path: str) -> Path:
 # SadTalker keeps every rendered frame of a character in RAM as float32 RGB, then copies it while
 # stacking and converting; ~3 copies are alive at the peak.
 _RENDER_COPIES = 3
+# Paste-back and GFPGAN enhancement stream frame by frame (see facerender/animate.py), so they
+# only hold a few tile-sized frames at once: the source tile, the blended frame and encoder
+# buffers, plus GFPGAN's input and its 2x-upscaled output (4x the pixels) when enhancing.
+_TILE_FRAMES_STANDARD = 4
+_TILE_FRAMES_ENHANCED = 4 + 1 + 4
 MEMORY_HEADROOM = 0.8  # use at most this share of currently available RAM
 
 
-def estimate_render_bytes(frames: int, size: int) -> int:
-    return int(frames) * size * size * 3 * 4 * _RENDER_COPIES
+def estimate_render_bytes(frames: int, size: int, tile_w: int = 0, tile_h: int = 0,
+                          enhanced: bool = False) -> int:
+    """Peak RAM for one character's SadTalker run.
+
+    ``frames x size^2`` float32 RGB predictions (~3 copies alive while stacking and converting)
+    dominate; the full-resolution tile (after Studio's upscale) adds a fixed number of frames.
+    """
+    render = int(frames) * size * size * 3 * 4 * _RENDER_COPIES
+    tile_frames = _TILE_FRAMES_ENHANCED if enhanced else _TILE_FRAMES_STANDARD
+    return render + int(tile_w) * int(tile_h) * 3 * tile_frames
 
 
-def check_memory_budget(speaker_frames: dict[str, int], size: int,
-                        available_bytes: Optional[int] = None) -> None:
-    """Refuse renders whose longest speaking part would not fit in memory (characters are
-    rendered one at a time, so the peak is the largest single part)."""
-    if not speaker_frames:
+def check_memory_budget(parts: dict[str, "int | tuple[int, int, int]"], size: int,
+                        available_bytes: Optional[int] = None, enhanced: bool = False) -> None:
+    """Refuse renders whose most demanding speaking part would not fit in memory (characters are
+    rendered one at a time, so the peak is the largest single part).
+
+    ``parts`` maps each character to ``frames`` or ``(frames, tile_w, tile_h)``, where the tile
+    size is the post-upscale image SadTalker receives.
+    """
+    if not parts:
         return
     if available_bytes is None:
         try:
@@ -101,16 +118,27 @@ def check_memory_budget(speaker_frames: dict[str, int], size: int,
             available_bytes = psutil.virtual_memory().available
         except Exception:  # noqa: BLE001 - without psutil, skip the check rather than block renders
             return
-    name, frames = max(speaker_frames.items(), key=lambda kv: kv[1])
-    need = estimate_render_bytes(frames, size)
+
+    def need_for(part) -> int:
+        frames, tile_w, tile_h = part if isinstance(part, tuple) else (part, 0, 0)
+        return estimate_render_bytes(frames, size, tile_w, tile_h, enhanced)
+
+    name, part = max(parts.items(), key=lambda kv: need_for(kv[1]))
+    frames = part[0] if isinstance(part, tuple) else part
+    need = need_for(part)
     budget = int(available_bytes * MEMORY_HEADROOM)
     if need > budget:
         gib = 1024 ** 3
-        hint = " or switch to 256 px quality" if size > 256 else ""
+        hints = []
+        if size > 256:
+            hints.append("switch to 256 px quality")
+        if enhanced:
+            hints.append("use Standard instead of Enhanced")
+        hint = "".join(f", {h}" for h in hints)
         raise UserFacingError(
             f"{name} speaks for {frames / FPS:.0f}s, which needs about {need / gib:.1f} GB of memory to "
-            f"render at {size} px, but only {available_bytes / gib:.1f} GB is free. Shorten {name}'s "
-            f"lines, split the scene into shorter parts{hint}, or close other applications."
+            f"render, but only {available_bytes / gib:.1f} GB is free. Shorten {name}'s lines, split "
+            f"the scene into shorter parts{hint}, or close other applications."
         )
 
 
@@ -215,11 +243,11 @@ def check_models(root: Path = REPO_ROOT, quality_mode: str = "standard", size: i
     needed += [weights / "alignment_WFLW_4HG.pth", weights / "detection_Resnet50_Final.pth"]
     if quality_mode == "enhanced":
         needed += [weights / "GFPGANv1.4.pth", weights / "parsing_parsenet.pth"]
-    from scripts.download_models import expected_for, is_complete
+    from scripts.download_models import expected_for, is_verified
 
     missing = [p.name for p in needed if not p.is_file()]
     broken = [p.name for p in needed
-              if p.is_file() and not is_complete(p, expected_for(p.relative_to(root).as_posix()))]
+              if p.is_file() and not is_verified(p, expected_for(p.relative_to(root).as_posix()))]
     if missing or broken:
         parts = []
         if missing:
@@ -331,7 +359,12 @@ def render(ctx: JobContext, req: RenderRequest, out_dir: Path, tts: TTSService, 
                     total_frames=plan.total_frames)
 
         # ---- 2. SadTalker per character ------------------------------------------------------
-        check_memory_budget({n: plan.speaker_frames.get(n, 0) for n in speakers_in_script}, req.quality.size)
+        parts = {}
+        for m in req.cast:
+            if m.name in speakers_in_script:
+                k = upscale_factor(m.region.w, m.region.h)  # same factor the tile gets below
+                parts[m.name] = (plan.speaker_frames.get(m.name, 0), m.region.w * k, m.region.h * k)
+        check_memory_budget(parts, req.quality.size, enhanced=req.quality.mode == "enhanced")
 
         import inference
         from src.studio.faces import retinaface_fallback

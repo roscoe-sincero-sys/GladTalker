@@ -114,23 +114,27 @@ def model_manifest() -> list[tuple[str, str]]:
 
 
 def models_status(root: Path = REPO_ROOT) -> dict:
-    """Readiness of each model file. A file counts as ready only if it has its pinned size, so a
-    truncated download is reported (``incomplete``) and repaired by the next download job."""
-    from scripts.download_models import expected_for, is_complete
+    """Readiness of each model file. A file is ``ready`` only if it has its pinned size *and*
+    SHA-256. Truncated files are ``incomplete``, same-size files with bad contents are
+    ``damaged``; both are repaired by the next download job. Digests are cached by size+mtime,
+    so only the first check after a file changes hashes it."""
+    from scripts.download_models import expected_for, is_complete, is_verified
 
     files = []
     for rel, url in model_manifest():
         path = Path(root) / rel
         expected = expected_for(rel)
         exists = path.is_file()
-        ready = is_complete(path, expected)
+        right_size = is_complete(path, expected)
+        ready = right_size and is_verified(path, expected)
         files.append({
             "path": rel,
             "name": path.name,
             "url": url,
             "exists": exists,
             "ready": ready,
-            "incomplete": exists and not ready,
+            "incomplete": exists and not right_size,
+            "damaged": right_size and not ready,
             "size_bytes": path.stat().st_size if exists else None,
             "expected_bytes": expected[0] if expected else None,
             "partial": any(path.parent.glob(path.name + ".*part")) if path.parent.is_dir() else False,
@@ -141,11 +145,11 @@ def models_status(root: Path = REPO_ROOT) -> dict:
 
 def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False) -> dict:
     """Job body: fetch every missing model file, reporting per-file byte progress."""
-    from scripts.download_models import DownloadIntegrityError, download_file, expected_for, is_complete
+    from scripts.download_models import DownloadIntegrityError, download_file, expected_for, is_verified
 
     manifest = model_manifest()
     todo = [(rel, url) for rel, url in manifest
-            if force or not is_complete(Path(root) / rel, expected_for(rel))]
+            if force or not is_verified(Path(root) / rel, expected_for(rel))]
     ctx.set_stages([Path(rel).name for rel, _ in todo] or ["check"])
     if not todo:
         ctx.progress(1.0, "All models are already downloaded.", stage="check")

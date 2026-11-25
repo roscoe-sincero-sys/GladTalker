@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from src.utils.device import get_device, is_gpu_device
-from src.utils.videoio import load_video_to_cv2
+from src.utils.videoio import load_video_to_cv2  # noqa: F401 - kept for callers importing it from here
 
 
 class SpandrelFaceRestorer:
@@ -119,16 +119,38 @@ def enhancer_list(images, method='gfpgan', bg_upsampler='realesrgan'):
     return list(gen)
 
 
+def _is_video_path(images):
+    return not isinstance(images, (list, tuple)) and isinstance(images, (str, os.PathLike)) and os.path.isfile(images)
+
+
+def video_frame_count(path):
+    cap = cv2.VideoCapture(path)
+    try:
+        return int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        cap.release()
+
+
+def iter_video_frames_rgb(path):
+    """Yield a video's frames as RGB one at a time (load_video_to_cv2 holds them all in RAM)."""
+    cap = cv2.VideoCapture(path)
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                return
+            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    finally:
+        cap.release()
+
+
 def enhancer_generator_with_len(images, method='gfpgan', bg_upsampler='realesrgan'):
     """ Provide a generator with a __len__ method so that it can passed to functions that
-    call len()"""
+    call len(). Video paths are read lazily, so frames are never all held in memory."""
 
-    if not isinstance(images, list) and os.path.isfile(images):  # handle video to images
-        # TODO: Create a generator version of load_video_to_cv2
-        images = load_video_to_cv2(images)
-
+    length = video_frame_count(images) if _is_video_path(images) else len(images)
     gen = enhancer_generator_no_len(images, method=method, bg_upsampler=bg_upsampler)
-    gen_with_len = GeneratorWithLen(gen, len(images))
+    gen_with_len = GeneratorWithLen(gen, length)
     return gen_with_len
 
 
@@ -138,8 +160,12 @@ def enhancer_generator_no_len(images, method='gfpgan', bg_upsampler='realesrgan'
     the enhancer function. """
 
     print('face enhancer....')
-    if not isinstance(images, list) and os.path.isfile(images):  # handle video to images
-        images = load_video_to_cv2(images)
+    if _is_video_path(images):  # stream video frames instead of decoding them all up front
+        total = video_frame_count(images)
+        frames = iter_video_frames_rgb(images)
+    else:
+        total = len(images)
+        frames = iter(images)
 
     # ------------------------ set up GFPGAN restorer ------------------------
     if method == 'gfpgan':
@@ -215,8 +241,8 @@ def enhancer_generator_no_len(images, method='gfpgan', bg_upsampler='realesrgan'
         )
 
     # ------------------------ restore ------------------------
-    for idx in tqdm(range(len(images)), 'Face Enhancer:'):
-        img = cv2.cvtColor(images[idx], cv2.COLOR_RGB2BGR)
+    for frame in tqdm(frames, 'Face Enhancer:', total=total):
+        img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         # restore faces and background if necessary
         cropped_faces, restored_faces, r_img = restorer.enhance(

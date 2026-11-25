@@ -26,6 +26,7 @@ _SPEAKER_LINE_RE = re.compile(
         (?:[-*•>]\s+)?                 # bullet / quote marker
         (?:\*\*|__|\*|_)?\s*                # opening emphasis
         (?P<name>[^\W\d_][\w.'’-]*(?:\s+[\w.'’-]+){0,3}?)
+        \s*(?:\*\*|__|\*|_)?                # closing emphasis before a parenthetical
         \s*(?:\((?P<note>[^)]{0,60})\))?    # (parenthetical)
         \s*(?:\*\*|__|\*|_)?                # closing emphasis before the colon
         \s*:                                # the colon
@@ -34,6 +35,23 @@ _SPEAKER_LINE_RE = re.compile(
     re.VERBOSE,
 )
 _HAS_LETTER_RE = re.compile(r"[^\W\d_]")
+
+
+def _known_speaker_re(cast: list[str]) -> Optional[re.Pattern]:
+    """Same shape as _SPEAKER_LINE_RE, but the name must be one of the cast (any length, any
+    case, flexible spacing). Tried first so long names like "The Man in the Hat" are recognised
+    instead of being folded into the previous speaker's line. Longest names win."""
+    if not cast:
+        return None
+    names = sorted({c for c in cast if c.strip()}, key=len, reverse=True)
+    alternatives = "|".join(r"\s+".join(re.escape(part) for part in n.split()) for n in names)
+    return re.compile(
+        r"^\s*(?:[-*•>]\s+)?(?:\*\*|__|\*|_)?\s*"
+        rf"(?P<name>{alternatives})"
+        r"\s*(?:\*\*|__|\*|_)?\s*(?:\((?P<note>[^)]{0,60})\))?\s*(?:\*\*|__|\*|_)?\s*:(?:\*\*|__|\*|_)?"
+        r"\s*(?P<text>.*)$",
+        re.IGNORECASE,
+    )
 
 
 @dataclass
@@ -126,6 +144,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     """
     cast_list = [c.strip() for c in cast if c and c.strip()]
     canonical: dict[str, str] = {c.casefold(): c for c in cast_list}
+    known_re = _known_speaker_re(cast_list)
 
     lines: list[ParsedLine] = []
     pending_speaker: Optional[str] = None
@@ -148,7 +167,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             pending_speaker, pending_note, current = canon(bare), None, None
             continue
 
-        m = _match_speaker_line(raw)
+        m = (known_re.match(raw) if known_re else None) or _match_speaker_line(raw)
         if m:
             speaker = canon(m.group("name"))
             body = m.group("text").strip()
