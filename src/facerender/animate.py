@@ -202,6 +202,8 @@ class AnimateFromCoeff():
         path = os.path.join(video_save_dir, 'temp_'+video_name)
         
         imageio.mimsave(path, result,  fps=float(25))
+        # The frames are on disk now; free the render buffers before paste-back and enhancement.
+        del predictions_video, video, result
 
         av_path = os.path.join(video_save_dir, video_name)
         return_path = av_path 
@@ -233,18 +235,23 @@ class AnimateFromCoeff():
 
         #### paste back then enhancers
         if enhancer:
-            from src.utils.face_enhancer import enhancer_generator_with_len, enhancer_list
+            from src.utils.face_enhancer import enhancer_generator_no_len
             video_name_enhancer = x['video_name']  + '_enhanced.mp4'
             enhanced_path = os.path.join(video_save_dir, 'temp_'+video_name_enhancer)
             av_path_enhancer = os.path.join(video_save_dir, video_name_enhancer) 
             return_path = av_path_enhancer
 
+            # Stream frames through the enhancer into the writer one at a time. (imageio.mimsave
+            # rejects generators, which used to force a fallback that held every enhanced frame,
+            # at 2x resolution, in RAM; its bare except also swallowed real errors.)
+            frames = enhancer_generator_no_len(full_video_path, method=enhancer, bg_upsampler=background_enhancer)
+            writer = imageio.get_writer(enhanced_path, fps=float(25))
             try:
-                enhanced_images_gen_with_len = enhancer_generator_with_len(full_video_path, method=enhancer, bg_upsampler=background_enhancer)
-                imageio.mimsave(enhanced_path, enhanced_images_gen_with_len, fps=float(25))
-            except:
-                enhanced_images_gen_with_len = enhancer_list(full_video_path, method=enhancer, bg_upsampler=background_enhancer)
-                imageio.mimsave(enhanced_path, enhanced_images_gen_with_len, fps=float(25))
+                for frame in frames:
+                    writer.append_data(frame)
+            finally:
+                frames.close()  # releases the input decoder even if the writer failed
+                writer.close()
             
             save_video_with_watermark(enhanced_path, new_audio_path, av_path_enhancer, watermark= False)
             print(f'The generated video is named {video_save_dir}/{video_name_enhancer}')

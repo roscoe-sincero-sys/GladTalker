@@ -1,3 +1,4 @@
+from src.utils.safe_io import imread, imwrite
 import numpy as np
 import cv2, os, sys, torch
 from tqdm import tqdm
@@ -73,7 +74,7 @@ class CropAndExtract():
             raise ValueError('input_path must be a valid path to video/image file')
         elif input_path.split('.')[-1] in ['jpg', 'png', 'jpeg']:
             # loader for first frame
-            full_frames = [cv2.imread(input_path)]
+            full_frames = [imread(input_path)]
             fps = 25
         else:
             # loader for videos
@@ -117,7 +118,7 @@ class CropAndExtract():
 
         # save crop info
         for frame in frames_pil:
-            cv2.imwrite(png_path, cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR))
+            imwrite(png_path, cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR))
 
         # 2. get the landmark according to the detected face. 
         if not os.path.isfile(landmarks_path): 
