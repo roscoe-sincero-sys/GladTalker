@@ -3,7 +3,7 @@
 // another window. (The shell only shows the notification if the Studio window isn't focused.)
 
 import { untrack } from 'svelte';
-import { api } from './api.js';
+import { api, whenNews } from './api.js';
 import { project } from './project.svelte.js';
 import { desktopCall } from './desktop.js';
 import { duration } from './format.js';
@@ -32,16 +32,17 @@ export function startRenderMonitor({ call = desktopCall } = {}) {
       progress(job.progress ?? 0);
     });
     watch.done.then(
-      async (final) => {
+      (final) => {
         if (watchedId !== id || !final) return;
-        progress(null);
-        if (!(await wasRunning) || watchedId !== id) return;
-        if (final.state === 'succeeded') {
-          const r = final.result ?? {};
-          notify('Your video is ready', `${duration(r.duration_s)}, ${r.width}×${r.height}. Open GladTalker Studio to watch it.`);
-        } else if (final.state === 'failed') {
-          notify('The render failed', final.error || final.message || 'Open GladTalker Studio for details.');
-        }
+        progress(null); // at once; only the notification waits for the lookup
+        whenNews(wasRunning, () => watchedId === id, () => {
+          if (final.state === 'succeeded') {
+            const r = final.result ?? {};
+            notify('Your video is ready', `${duration(r.duration_s)}, ${r.width}×${r.height}. Open GladTalker Studio to watch it.`);
+          } else if (final.state === 'failed') {
+            notify('The render failed', final.error || final.message || 'Open GladTalker Studio for details.');
+          }
+        });
       },
       () => {
         if (watchedId === id) progress(null);

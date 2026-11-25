@@ -55,7 +55,7 @@ Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that o
   - In development builds (`npm run tauri:dev`), the engine also accepts the dev server's origin (`build.devUrl`). Release builds never do.
   - It stops the engine and everything it started when you close the app (Windows: the whole process tree; elsewhere: the engine's process group). The engine also watches the app's process (`--exit-with-parent`), so it stops even if the app crashes.
   - Start, restart, and changing the folder happen one at a time, so a restart during a slow first start replaces the engine instead of returning the old one.
-- **Saving:** **Save project** opens a native Save dialog. Saving is atomic: the file is written next to the old one and then replaces it, so a failed save never leaves a truncated project. **Open…** uses the system file picker.
+- **Saving:** **Save project** opens a native Save dialog. Saving is atomic: the file is written next to the old one and then replaces it, so a failed save never leaves a truncated project. Saving over a file keeps who may read it: on Windows the new contents get the old file's access list (DACL) before anything is written, and `ReplaceFileW` swaps them in; on macOS and Linux they get its permission bits and group. **Open…** uses the system file picker.
 - **Finished videos:** **Show the video in its folder** opens the file manager. It only works for files the engine wrote, inside its workspace.
 - **While rendering:**
   - Render progress appears on the taskbar icon.
@@ -76,9 +76,9 @@ npm run tauri:build   # release build + installer (Windows: src-tauri/target/rel
 
 ### Testing the desktop app
 
-- `cd src-tauri && cargo test` runs the Rust unit tests: engine discovery, the ready line, tokens, and the workspace check.
+- `cd src-tauri && cargo test` runs the Rust unit tests: engine discovery, the ready line, tokens, the workspace check, and atomic saving (on Windows, also that an owner-only file stays owner-only, even while being written).
 - `npm run e2e:desktop` (Windows, after `npm run tauri:build`) launches the built app with `GLADTALKER_HOME` set to this repository, attaches Playwright to its WebView2 over the DevTools protocol, and checks that:
-  - each run uses its own temporary profile, so it never touches your own autosaved project, settings, or renders: a WebView2 profile (`WEBVIEW2_USER_DATA_FOLDER`), settings and logs (`GLADTALKER_STUDIO_DATA_DIR`), and an engine workspace (`GLADTALKER_STUDIO_WORKSPACE`), plus a free DevTools port;
+  - each run uses its own temporary profile, so it never touches your own autosaved project, settings, or renders: a WebView2 profile (`WEBVIEW2_USER_DATA_FOLDER`), settings and logs (`GLADTALKER_STUDIO_DATA_DIR`), and an engine workspace (`GLADTALKER_STUDIO_WORKSPACE`), plus a free DevTools port. The app runs in the profile folder with a relative workspace, which it must resolve to the same absolute folder for the engine and for **Show in folder**;
   - the engine starts;
   - there are no axe WCAG 2.2 A/AA violations;
   - an upload, face detection, and a real audio preview work;

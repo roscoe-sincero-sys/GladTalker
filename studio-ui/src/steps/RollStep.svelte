@@ -1,6 +1,6 @@
 <script>
   import { onDestroy, untrack } from 'svelte';
-  import { api, basename, revokeMedia } from '../lib/api.js';
+  import { api, basename, revokeMedia, whenNews } from '../lib/api.js';
   import { project, renderRequest } from '../lib/project.svelte.js';
   import { submitting, submitRender } from '../lib/jobs.svelte.js';
   import { engine, goTo, STEPS } from '../lib/app-state.svelte.js';
@@ -101,13 +101,12 @@
       if (mine()) job = j;
     });
     watch.done.then(
-      async (final) => {
+      (final) => {
         if (!mine() || !final) return;
-        const live = await wasRunning;
-        if (!mine()) return;
-        if (final.state === 'succeeded') loadVideo(final, live);
-        else if (final.state === 'failed' && live) announceError(`Render failed: ${final.error || final.message}`);
-        else if (final.state === 'cancelled' && live) announce('Render cancelled.');
+        // The video loads at once; only the announcement waits for the lookup.
+        if (final.state === 'succeeded') loadVideo(final, wasRunning);
+        else if (final.state === 'failed') whenNews(wasRunning, mine, () => announceError(`Render failed: ${final.error || final.message}`));
+        else if (final.state === 'cancelled') whenNews(wasRunning, mine, () => announce('Render cancelled.'));
       },
       (err) => {
         // The engine no longer knows this job (it restarted, or dropped it from its history).
@@ -121,6 +120,7 @@
 
   // The video first, then the captions on their own: a caption hiccup never hides the video.
   // Each URL is kept only if this view still shows that render; otherwise it is released.
+  // `announceIt`: true, or jobWasRunning()'s answer (the video never waits for it).
   async function loadVideo(final, announceIt = true) {
     const mine = following(final.id);
     mediaError = '';
@@ -133,7 +133,7 @@
     }
     if (!mine()) return revokeMedia(url);
     setMedia(url, vttUrl, srtUrl);
-    if (announceIt) announce(`Your video is ready: ${duration(final.result.duration_s)}, ${final.result.width}×${final.result.height}. The player and download links are below.`);
+    whenNews(announceIt, mine, () => announce(`Your video is ready: ${duration(final.result.duration_s)}, ${final.result.width}×${final.result.height}. The player and download links are below.`));
     await loadCaptions(final);
   }
 

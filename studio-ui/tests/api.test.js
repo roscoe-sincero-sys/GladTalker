@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createApi, readEngineToken, ApiError, basename, revokeMedia, isJobId } from '../src/lib/api.js';
+import { createApi, readEngineToken, ApiError, basename, revokeMedia, isJobId, whenNews } from '../src/lib/api.js';
 
 const json = (status, body) => ({ ok: status < 400, status, json: async () => body, blob: async () => new Blob(['x']) });
 
@@ -86,6 +86,34 @@ describe('jobWasRunning', () => {
     expect(await api.jobWasRunning('00000000000d')).toBe(false); // 404
     expect(await api.jobWasRunning('../x')).toBe(false); // not even requested
     expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+  it('gives up after a bounded wait, counting the job as not news', async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi({ fetchImpl: () => new Promise(() => {}) }); // the engine never answers
+      const answer = api.jobWasRunning('00000000000a', { timeoutMs: 5000 });
+      let settled;
+      answer.then((v) => (settled = v));
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('whenNews', () => {
+  it('speaks only if the job was live and the view still follows it, and never throws', async () => {
+    const said = [];
+    whenNews(Promise.resolve(true), () => true, () => said.push('live'));
+    whenNews(Promise.resolve(false), () => true, () => said.push('history'));
+    whenNews(Promise.resolve(true), () => false, () => said.push('moved on'));
+    whenNews(Promise.reject(new Error('x')), () => true, () => said.push('broken'));
+    whenNews(true, () => true, () => said.push('known'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(said.sort()).toEqual(['known', 'live']);
   });
 });
 

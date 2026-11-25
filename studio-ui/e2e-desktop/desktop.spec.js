@@ -78,10 +78,13 @@ async function launchApp(profile) {
     env: { ...process.env, GLADTALKER_HOME: repo,
       WEBVIEW2_USER_DATA_FOLDER: profile.webview,
       GLADTALKER_STUDIO_DATA_DIR: profile.data,
-      GLADTALKER_STUDIO_WORKSPACE: profile.workspace,
+      // Relative on purpose: the app runs in the profile folder and the engine in GladTalker's, so
+      // the app must resolve it once (to profile.workspace) for both.
+      GLADTALKER_STUDIO_WORKSPACE: path.relative(profile.root, profile.workspace),
       // A web-mode bind address the desktop engine must not inherit (it always uses 127.0.0.1).
       GLADTALKER_STUDIO_HOST: '::1',
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
+    cwd: profile.root,
     stdio: 'ignore',
   });
   const browser = await waitFor(async () => {
@@ -129,8 +132,14 @@ test('the desktop app starts its engine, works end to end, and stops the engine 
     for (const line of engineCommandLines(app.pid)) {
       expect(line).not.toMatch(/--token/);
       expect(line).toContain('--host 127.0.0.1');
-      expect(line).toContain(profile.workspace); // the test's own workspace
+      expect(line).toContain(`--workspace ${profile.workspace}`); // the test's own, made absolute
     }
+    // The shell checks "Show in folder" against that same absolute workspace.
+    const status = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('start_engine'));
+    expect(status.state).toBe('ready');
+    expect(status.workspace).toBe(profile.workspace);
+    await expect(page.evaluate(() => window.__TAURI_INTERNALS__.invoke('reveal_file', { path: 'C:\\Windows\\win.ini' })))
+      .rejects.toThrow(/Only files that GladTalker Studio made/);
 
     // No WCAG 2.2 A/AA violations in the desktop window. (Evaluated over CDP, which the page's
     // Content-Security-Policy doesn't apply to; the policy itself stays on.)

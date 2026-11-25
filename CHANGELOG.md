@@ -13,14 +13,14 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 
 ### Added
 - **GladTalker Studio desktop app (phase 3 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio-ui/src-tauri/`, a Tauri v2 shell around the Studio UI. On Windows it builds a 1.3 MB NSIS installer. See [studio-ui/README.md](studio-ui/README.md#desktop-app).
-  - **Engine:** the app finds the GladTalker folder and its venv (a folder just chosen with a native dialog, `GLADTALKER_HOME`, the folder chosen in an earlier session, or the folders around the app). It starts `studio_server.py` on a free port with a fresh 256-bit token, passed in the environment rather than on the command line. It stops the engine's whole process tree on exit. The engine is always bound to 127.0.0.1, and its ready line must confirm that. Start, restart, and folder changes are serialized. Debug builds also allow the dev server's origin, so `npm run tauri:dev` works. If something goes wrong, a setup screen says what's missing, shows the engine's last messages, and offers **Choose GladTalker folder…** and **Try again**.
+  - **Engine:** the app finds the GladTalker folder and its venv (a folder just chosen with a native dialog, `GLADTALKER_HOME`, the folder chosen in an earlier session, or the folders around the app). It starts `studio_server.py` on a free port with a fresh 256-bit token, passed in the environment rather than on the command line. It stops the engine's whole process tree on exit. A relative `GLADTALKER_STUDIO_WORKSPACE` is resolved once, against the app's working directory, for both the engine and the app's own checks. The engine is always bound to 127.0.0.1, and its ready line must confirm that. Start, restart, and folder changes are serialized. Debug builds also allow the dev server's origin, so `npm run tauri:dev` works. If something goes wrong, a setup screen says what's missing, shows the engine's last messages, and offers **Choose GladTalker folder…** and **Try again**.
   - **Native features:**
-    - **Save project…** opens a Save dialog, and saves atomically, so a failed save never truncates the old file.
+    - **Save project…** opens a Save dialog, and saves atomically, so a failed save never truncates the old file. Saving over a project keeps its access restrictions: on Windows the new contents get the file's DACL before they are written and `ReplaceFileW` swaps them in; elsewhere they get its permission bits and group.
     - **Show the video in its folder** works only for files inside the engine's workspace.
-    - A notification fires when a render ends while the app is in the background.
+    - A notification fires when a render ends while the app is in the background. A render that had already ended before the app started following it (its history is replayed) doesn't notify, and checking that never holds up the video or audio.
     - Render progress appears on the taskbar icon.
   - **Security:** the page has a strict CSP and only the app's own commands, with no plugin permissions granted to it.
-  - **Tests:** Rust unit tests cover engine discovery, the ready line, tokens, and the workspace check. Desktop end-to-end tests (`npm run e2e:desktop`) launch the real app and attach to its WebView2:
+  - **Tests:** Rust unit tests cover engine discovery, the ready line, tokens, the workspace check, and atomic saving (including a Windows ACL check). Desktop end-to-end tests (`npm run e2e:desktop`) launch the real app, each run in its own temporary profile, and attach to its WebView2:
     - start → axe scan → upload, detect, and a real audio preview;
     - closing the app stops the engine;
     - killing the app still stops the engine.

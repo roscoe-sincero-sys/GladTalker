@@ -210,20 +210,34 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
     job: async (id) => request('GET', jobPath(id)),
     /** Was the job still queued or running when we looked? Only then is its ending news worth
      * announcing or notifying: a watcher also replays the history of a job that ended long ago.
-     * Never rejects (an unknown state counts as "not running"). */
-    jobWasRunning: async (id) => {
-      try {
-        const snapshot = await request('GET', jobPath(id));
-        return snapshot.state === 'queued' || snapshot.state === 'running';
-      } catch {
-        return false;
-      }
+     * Never rejects, and gives up after `timeoutMs` (an unknown state counts as "not running").
+     * Use it only to decide on an announcement (see whenNews): never wait on it to show results. */
+    jobWasRunning: (id, { timeoutMs = JOB_LOOKUP_TIMEOUT_MS } = {}) => {
+      const lookup = Promise.resolve().then(() => request('GET', jobPath(id))).then(
+        (snapshot) => snapshot.state === 'queued' || snapshot.state === 'running',
+        () => false,
+      );
+      let timer;
+      const gaveUp = new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+      return Promise.race([lookup, gaveUp]).finally(() => clearTimeout(timer));
     },
     cancelJob: async (id) => request('POST', jobPath(id, '/cancel')),
     fileUrl: async (id, kind) => mediaUrl(filePath(id, kind)),
     plainFileUrl: (id, kind) => `${base}${filePath(id, kind)}`,
     watchJob,
   };
+}
+
+/** How long jobWasRunning() waits for the engine before treating the job as not news. */
+export const JOB_LOOKUP_TIMEOUT_MS = 10_000;
+
+/** Says something about a job's ending once `wasRunning` (from jobWasRunning) settles, if the
+ * job was still live when the view attached and `stillCurrent()` holds. Returns at once: the
+ * lookup never holds up the result itself (the video, the audio, the error shown on screen). */
+export function whenNews(wasRunning, stillCurrent, say) {
+  Promise.resolve(wasRunning).then((live) => {
+    if (live && stillCurrent()) say();
+  }, () => {});
 }
 
 /** Release a URL made by mediaUrl() (a no-op for plain URLs). */

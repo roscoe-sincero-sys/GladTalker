@@ -1,6 +1,6 @@
 <script>
   import { onDestroy, tick, untrack } from 'svelte';
-  import { api, revokeMedia } from '../lib/api.js';
+  import { api, revokeMedia, whenNews } from '../lib/api.js';
   import { project, newId, nextStyleIndex, audioPreviewRequest, projectGuard, previewDigest,
     MAX_CAST, MAX_LINES, MAX_LINE_CHARS } from '../lib/project.svelte.js';
   import { submitting, submitPreview } from '../lib/jobs.svelte.js';
@@ -229,11 +229,10 @@
     previewWatch.done.then(
       async (final) => {
         if (!mine() || !final) return;
-        const live = await wasRunning;
-        if (!mine()) return;
+        // The result is shown at once; only the announcement waits for the lookup.
         if (final.state !== 'succeeded') {
           previewJob = final;
-          if (final.state === 'failed' && live) announceError(final.error || 'The audio preview failed.');
+          if (final.state === 'failed') whenNews(wasRunning, mine, () => announceError(final.error || 'The audio preview failed.'));
           return;
         }
         previewLoading = true;
@@ -242,7 +241,7 @@
           if (!mine()) return revokeMedia(url);
           previewJob = final;
           setPreviewUrl(url);
-          if (live) announce(`Audio mix ready: ${duration(final.result.duration_s)} at ${pacingLabel(final.result.tempo)}. Use the player to listen.`);
+          whenNews(wasRunning, mine, () => announce(`Audio mix ready: ${duration(final.result.duration_s)} at ${pacingLabel(final.result.tempo)}. Use the player to listen.`));
         } catch (err) {
           if (!mine()) return;
           previewJob = null;

@@ -125,6 +125,18 @@ pub fn workspace_of(folder: &Path) -> PathBuf {
     folder.join("results").join("studio")
 }
 
+/// The engine's workspace as one absolute path, used both on the engine's command line and for
+/// the shell's own checks (Reveal). A relative override is resolved against `base`, the app's
+/// working directory at launch: the engine runs in its own folder, so passing it a relative path
+/// would make the two processes disagree about where the workspace is.
+pub fn resolve_workspace(override_path: Option<PathBuf>, base: &Path, folder: &Path) -> PathBuf {
+    match override_path.filter(|p| !p.as_os_str().is_empty()) {
+        Some(p) if p.is_absolute() => p,
+        Some(p) => base.join(p),
+        None => workspace_of(folder),
+    }
+}
+
 /// Is `path` a file inside the engine's workspace? Used before revealing a file in the file
 /// manager, so the UI can only point at what the engine itself wrote.
 pub fn is_inside(workspace: &Path, path: &Path) -> bool {
@@ -145,32 +157,6 @@ pub fn parse_ready_line(line: &str) -> Option<(String, u16)> {
     }
     let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;
     Some((value.get("host")?.as_str()?.to_string(), port))
-}
-
-/// Writes a file so that it is either fully replaced or left as it was: the bytes go to a
-/// temporary file next to it, which then replaces the original (on Windows too). A failed or
-/// interrupted save never leaves a truncated project behind.
-pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    write_atomically_with(path, |file| file.write_all(contents))
-}
-
-pub fn write_atomically_with(
-    path: &Path,
-    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
-    let result = (|| {
-        let mut file = fs::File::create(&tmp)?;
-        write(&mut file)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp, path) // replaces an existing file, also on Windows
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }
 
 /// The engine's command line and environment. The token travels in the environment (process
@@ -383,7 +369,7 @@ pub fn save_choice(path: &Path, choice: &SavedChoice) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    fs::write(path, serde_json::to_string_pretty(choice)?)
+    crate::safe_write::write_atomically(path, serde_json::to_string_pretty(choice)?.as_bytes())
 }
 
 #[cfg(test)]
@@ -497,25 +483,23 @@ mod tests {
     }
 
     #[test]
-    fn saving_replaces_the_file_whole_or_not_at_all() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("scene.gladtalker.json");
-        fs::write(&path, b"original project").unwrap();
+    fn a_relative_workspace_override_is_made_absolute_once_for_shell_and_engine() {
+        let base = Path::new(if cfg!(windows) { r"C:\launch\here" } else { "/launch/here" });
+        let folder = Path::new(if cfg!(windows) { r"C:\GladTalker" } else { "/GladTalker" });
+        let relative = resolve_workspace(Some(PathBuf::from("ws")), base, folder);
+        assert_eq!(relative, base.join("ws"));
+        assert!(relative.is_absolute());
+        let absolute = folder.join("elsewhere");
+        assert_eq!(resolve_workspace(Some(absolute.clone()), base, folder), absolute);
+        assert_eq!(resolve_workspace(None, base, folder), workspace_of(folder));
+        assert_eq!(resolve_workspace(Some(PathBuf::new()), base, folder), workspace_of(folder));
 
-        // A write that fails halfway leaves the original bytes, and no temporary file.
-        let err = write_atomically_with(&path, |f| {
-            f.write_all(b"half of the new")?;
-            Err(std::io::Error::other("disk full"))
-        });
-        assert!(err.is_err());
-        assert_eq!(fs::read(&path).unwrap(), b"original project");
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1, "the temporary file was removed");
-
-        write_atomically(&path, b"new project").unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"new project");
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
-        write_atomically(&tmp.path().join("fresh.json"), b"{}").unwrap(); // a new file works too
-        assert_eq!(fs::read(tmp.path().join("fresh.json")).unwrap(), b"{}");
+        // The engine gets that same absolute path (it runs in its own folder, not the app's).
+        let found = Located { folder: folder.to_path_buf(), python: folder.join("python") };
+        let cmd = engine_command(&found, &relative, "t", &[]);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let at = args.iter().position(|a| a == "--workspace").expect("--workspace");
+        assert_eq!(Path::new(&args[at + 1]), relative);
     }
 
     #[test]

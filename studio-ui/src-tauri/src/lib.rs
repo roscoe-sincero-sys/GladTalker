@@ -13,6 +13,7 @@
 #![allow(clippy::result_large_err)]
 
 mod engine;
+mod safe_write;
 mod supervisor;
 
 use std::path::PathBuf;
@@ -53,12 +54,11 @@ fn log_file(app: &AppHandle) -> PathBuf {
     .join("engine.log")
 }
 
-/// The engine's workspace: `<folder>/results/studio`, or `GLADTALKER_STUDIO_WORKSPACE`.
+/// The engine's workspace: `<folder>/results/studio`, or `GLADTALKER_STUDIO_WORKSPACE` (a
+/// relative one is taken from the app's working directory), always as an absolute path.
 fn workspace_for(folder: &std::path::Path) -> PathBuf {
-    std::env::var_os("GLADTALKER_STUDIO_WORKSPACE")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| engine::workspace_of(folder))
+    let base = std::env::current_dir().unwrap_or_else(|_| folder.to_path_buf());
+    engine::resolve_workspace(std::env::var_os("GLADTALKER_STUDIO_WORKSPACE").map(PathBuf::from), &base, folder)
 }
 
 /// Development builds load the UI from the dev server (`build.devUrl`), a different origin
@@ -159,8 +159,8 @@ async fn save_project(app: AppHandle, contents: String, suggested_name: String) 
         let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
             return Ok(None);
         };
-        // Whole or not at all: a failed save never leaves a truncated project behind.
-        engine::write_atomically(&path, contents.as_bytes())
+        // Whole or not at all, and an existing file keeps its access restrictions.
+        safe_write::write_atomically(&path, contents.as_bytes())
             .map_err(|e| format!("Couldn’t save {}: {e}. The previous file, if any, is unchanged.", path.display()))?;
         Ok(Some(path.display().to_string()))
     })
