@@ -1,8 +1,9 @@
 <script>
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { api, revokeMedia } from '../lib/api.js';
   import { project, newId, nextStyleIndex, audioPreviewRequest, projectGuard,
     MAX_CAST, MAX_LINES, MAX_LINE_CHARS } from '../lib/project.svelte.js';
+  import { submitting, submitPreview } from '../lib/jobs.svelte.js';
   import { goTo } from '../lib/app-state.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import { linesFromParse, moveLine, nameKey } from '../lib/script-lines.js';
@@ -18,25 +19,41 @@
   let importing = $state(false);
   let importMessage = $state('');
   let unknownSpeakers = $state([]);
-  let warnings = $state({}); // line id -> [{code, message, fix}]
+  // line id -> { text, items: [{code, message, fix}] }. Suggestions belong to the exact text they
+  // were made for: once the line changes they are hidden, and Auto-Fix can't apply an old one.
+  let warnings = $state({});
   let playingId = $state(null);
-  let previewJob = $state(null);
+  let previewJob = $state(null); // progress, then the finished job (set together with its audio)
   let previewUrl = $state('');
-  let previewKey = $state('');
+  let previewError = $state('');
+  let previewLoading = $state(false); // the job is done; its audio is being fetched
+  let previewAttachedId = null;
   let previewWatch = null;
   let destroyed = false;
 
   const castNames = $derived(project.cast.map((m) => m.name.trim()).filter(Boolean));
   const currentKey = $derived(JSON.stringify(audioPreviewRequest(project)));
-  const previewStale = $derived(previewKey && previewKey !== currentKey);
   const previewResult = $derived(previewJob?.state === 'succeeded' ? previewJob.result : null);
+  const previewStale = $derived(Boolean(previewResult && project.lastPreviewKey && project.lastPreviewKey !== currentKey));
+  const previewBusy = $derived(submitting.preview || previewLoading
+    || previewJob?.state === 'queued' || previewJob?.state === 'running');
   const previewBlockers = $derived(audioProblems(project));
   const castFull = $derived(project.cast.length >= MAX_CAST);
+  const lintFor = (line) => (warnings[line.id]?.text === line.text ? warnings[line.id].items : []);
 
   function setPreviewUrl(url) {
     revokeMedia(previewUrl);
     previewUrl = url;
   }
+
+  // Show whichever preview the project points at (one just started, possibly accepted while
+  // this step was closed, or the last one after coming back).
+  $effect(() => {
+    const id = project.lastPreviewJobId;
+    untrack(() => {
+      if (id !== previewAttachedId) attachPreview(id);
+    });
+  });
 
   onDestroy(() => {
     destroyed = true;
@@ -49,15 +66,15 @@
   let lintTimer;
   let lintSeq = 0;
   $effect(() => {
-    const lines = project.script.map((l) => ({ id: l.id, text: l.text.slice(0, MAX_LINE_CHARS) }));
+    const lines = project.script.map((l) => ({ id: l.id, text: l.text }));
     clearTimeout(lintTimer);
     lintTimer = setTimeout(async () => {
       const seq = ++lintSeq;
       if (!lines.length) return (warnings = {});
       try {
-        const res = await api.lintLines(lines.slice(0, MAX_LINES).map((l) => l.text));
+        const res = await api.lintLines(lines.slice(0, MAX_LINES).map((l) => l.text.slice(0, MAX_LINE_CHARS)));
         if (seq !== lintSeq || destroyed) return;
-        warnings = Object.fromEntries(lines.map((l, i) => [l.id, res.lines[i] ?? []]));
+        warnings = Object.fromEntries(lines.map((l, i) => [l.id, { text: l.text, items: res.lines[i] ?? [] }]));
       } catch {
         /* lint is advisory: ignore failures */
       }
@@ -170,37 +187,69 @@
   }
 
   function onfix(line, fixed) {
+    if (!lintFor(line).some((w) => w.fix === fixed)) return; // the line changed since: not this fix
     line.text = fixed;
     announce('Applied the suggested wording.');
   }
 
   async function previewMix() {
-    setPreviewUrl('');
-    previewWatch?.close();
-    const body = audioPreviewRequest(project);
-    previewKey = JSON.stringify(body);
-    const current = projectGuard();
+    previewError = '';
     try {
-      previewJob = await api.previewAudio(body);
-      if (!current() || destroyed) return;
-      project.lastPreviewJobId = previewJob.id;
-      announce('Building the full audio mix…');
-      previewWatch = api.watchJob(previewJob.id, (j) => (previewJob = j));
-      const final = await previewWatch.done;
-      if (final?.state === 'succeeded') {
-        const url = await api.fileUrl(final.id, 'audio');
-        if (destroyed) return revokeMedia(url);
-        setPreviewUrl(url);
-        announce(`Audio mix ready: ${duration(final.result.duration_s)} at ${pacingLabel(final.result.tempo)}. Use the player to listen.`);
-      } else if (final?.state === 'failed') {
-        announceError(final.error || 'The audio preview failed.');
-      }
+      const accepted = await submitPreview(audioPreviewRequest(project));
+      if (accepted) announce('Building the full audio mix…');
     } catch (err) {
-      if (destroyed) return;
-      previewKey = '';
       announceError(err.message);
-      previewJob = { state: 'failed', error: err.message, message: err.message, progress: 0, stages: [] };
+      if (!destroyed) previewError = err.message;
     }
+  }
+
+  // One preview at a time on screen. Everything that arrives for an older attempt (progress,
+  // the finished job, its audio) is dropped, and a fetched audio blob is released; the finished
+  // job and its audio are shown together, so the timeline always matches what plays.
+  function attachPreview(id) {
+    previewAttachedId = id;
+    previewWatch?.close();
+    previewWatch = null;
+    previewJob = null;
+    previewLoading = false;
+    setPreviewUrl('');
+    if (!id) return;
+    previewError = '';
+    const mine = () => previewAttachedId === id && !destroyed;
+    let live = false;
+    previewWatch = api.watchJob(id, (j) => {
+      if (!mine()) return;
+      if (j.state === 'queued' || j.state === 'running') live = true;
+      if (j.state !== 'succeeded') previewJob = j;
+    });
+    previewWatch.done.then(
+      async (final) => {
+        if (!mine() || !final) return;
+        if (final.state !== 'succeeded') {
+          previewJob = final;
+          if (final.state === 'failed' && live) announceError(final.error || 'The audio preview failed.');
+          return;
+        }
+        previewLoading = true;
+        try {
+          const url = await api.fileUrl(id, 'audio');
+          if (!mine()) return revokeMedia(url);
+          previewJob = final;
+          setPreviewUrl(url);
+          if (live) announce(`Audio mix ready: ${duration(final.result.duration_s)} at ${pacingLabel(final.result.tempo)}. Use the player to listen.`);
+        } catch (err) {
+          if (!mine()) return;
+          previewJob = null;
+          previewError = `The audio mix is ready, but it couldn’t be loaded: ${err.message}`;
+        } finally {
+          if (mine()) previewLoading = false;
+        }
+      },
+      () => {
+        // The engine no longer has this preview (restarted, or older than its history): forget it.
+        if (mine() && project.lastPreviewJobId === id) project.lastPreviewJobId = null;
+      },
+    );
   }
 </script>
 
@@ -247,7 +296,7 @@
       <ol class="lines">
         {#each project.script as line, i (line.id)}
           <DialogueRow {line} index={i} total={project.script.length} cast={project.cast}
-            warnings={warnings[line.id] ?? []} playing={playingId === line.id}
+            warnings={lintFor(line)} playing={playingId === line.id}
             {onmove} {ondelete} {onplay} {onfix} />
         {/each}
       </ol>
@@ -274,8 +323,8 @@
       {/if}
 
       <div class="preview">
-        <button type="button" onclick={previewMix} disabled={previewBlockers.length > 0 || previewJob?.state === 'running' || previewJob?.state === 'queued'}
-          aria-describedby="preview-mix-hint">▶ Preview full audio mix</button>
+        <button type="button" onclick={previewMix} disabled={previewBlockers.length > 0 || previewBusy}
+          aria-describedby="preview-mix-hint">▶ {submitting.preview ? 'Starting the preview…' : 'Preview full audio mix'}</button>
         {#if previewBlockers.length}
           <div class="hint" id="preview-mix-hint">
             <p>To preview the mix, first:</p>
@@ -293,6 +342,13 @@
           <p class="hint muted" id="preview-mix-hint">Hear every line with its voice and pacing, before rendering any video.</p>
         {/if}
         <JobProgress job={previewJob?.state === 'succeeded' ? null : previewJob} id="preview-job" label="Audio mix" />
+        {#if previewLoading}<p class="muted">Loading the audio mix…</p>{/if}
+        {#if previewError}
+          <p class="error-text">{previewError}</p>
+          {#if project.lastPreviewJobId && !previewBusy}
+            <button type="button" onclick={() => attachPreview(project.lastPreviewJobId)}>Try loading the audio mix again</button>
+          {/if}
+        {/if}
         {#if previewResult}
           {#if previewStale}<p class="error-text">The script or voices changed since this preview. Preview again to hear the changes.</p>{/if}
           <div class="field">

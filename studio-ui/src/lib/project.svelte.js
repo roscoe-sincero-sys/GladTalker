@@ -27,6 +27,7 @@ export function defaultProject() {
     captions: true,
     lastRenderJobId: null,
     lastPreviewJobId: null,
+    lastPreviewKey: null, // the audioPreviewRequest that preview was made from
   };
 }
 

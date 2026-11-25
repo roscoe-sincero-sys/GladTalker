@@ -1,7 +1,8 @@
 <script>
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { api, basename, revokeMedia } from '../lib/api.js';
-  import { project, renderRequest, projectGuard } from '../lib/project.svelte.js';
+  import { project, renderRequest } from '../lib/project.svelte.js';
+  import { submitting, submitRender } from '../lib/jobs.svelte.js';
   import { engine, goTo, STEPS } from '../lib/app-state.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import { renderProblems } from '../lib/validate.js';
@@ -23,9 +24,11 @@
   let srtUrl = $state('');
   let rate = $state('1');
   let video = $state();
-  let starting = $state(false);
   let startError = $state('');
-  let watch = null; // the one watcher for the current render; closed when the step closes
+  let mediaError = $state(''); // the video couldn't be fetched (token mode); Retry
+  let captionError = $state(''); // the caption files couldn't be fetched; Retry captions
+  let attachedId = null; // the render this view is following
+  let watch = null; // its watcher; closed when the step closes or another render starts
   let destroyed = false;
 
   const problems = $derived(renderProblems(project, { models: engine.models, ffmpeg: engine.hardware?.ffmpeg?.available ?? null }));
@@ -53,57 +56,101 @@
     srtUrl = srt;
   }
 
+  // Follow whichever render the project points at: one just started (even if it was accepted
+  // while this step was closed), or the last one after a reload. Renders keep running in the
+  // engine whether or not anyone is watching.
+  $effect(() => {
+    const id = project.lastRenderJobId;
+    untrack(() => {
+      if (id !== attachedId) attach(id);
+    });
+  });
+
   onDestroy(() => {
     destroyed = true;
     watch?.close();
     setMedia();
   });
 
-  async function showResult(final) {
-    const urls = [await api.fileUrl(final.id, 'video'),
-      final.result.vtt_path ? await api.fileUrl(final.id, 'vtt') : '',
-      final.result.srt_path ? await api.fileUrl(final.id, 'srt') : ''];
-    if (destroyed) return urls.forEach(revokeMedia);
-    setMedia(...urls);
-    announce(`Your video is ready: ${duration(final.result.duration_s)}, ${final.result.width}×${final.result.height}. The player and download links are below.`);
+  const following = (id) => () => attachedId === id && !destroyed;
+
+  function attach(id) {
+    attachedId = id;
+    watch?.close();
+    watch = null;
+    job = null;
+    setMedia();
+    mediaError = '';
+    captionError = '';
+    if (!id) return;
+    const mine = following(id);
+    let live = false; // saw it running here, so its ending is news worth announcing
+    watch = api.watchJob(id, (j) => {
+      if (!mine()) return;
+      if (j.state === 'queued' || j.state === 'running') live = true;
+      job = j;
+    });
+    watch.done.then(
+      (final) => {
+        if (!mine() || !final) return;
+        if (final.state === 'succeeded') loadVideo(final, live);
+        else if (final.state === 'failed' && live) announceError(`Render failed: ${final.error || final.message}`);
+        else if (final.state === 'cancelled' && live) announce('Render cancelled.');
+      },
+      (err) => {
+        // The engine no longer knows this job (it restarted, or dropped it from its history).
+        if (!mine()) return;
+        job = null;
+        if (project.lastRenderJobId === id) project.lastRenderJobId = null;
+        announceError(`Lost track of the last render: ${err.message} Its files may still be in the results folder.`);
+      },
+    );
   }
 
-  async function follow(id) {
-    watch?.close();
-    watch = api.watchJob(id, (j) => (job = j));
-    let final;
+  // The video first, then the captions on their own: a caption hiccup never hides the video.
+  // Each URL is kept only if this view still shows that render; otherwise it is released.
+  async function loadVideo(final, announceIt = true) {
+    const mine = following(final.id);
+    mediaError = '';
+    let url;
     try {
-      final = await watch.done;
+      url = await api.fileUrl(final.id, 'video');
     } catch (err) {
-      // The engine no longer knows this job (it restarted, or dropped it from its history).
-      if (destroyed) return;
-      job = null;
-      if (project.lastRenderJobId === id) project.lastRenderJobId = null;
-      announceError(`Lost track of the render: ${err.message} Check the results folder, or render again.`);
+      if (mine()) mediaError = `The video is finished, but it couldn’t be loaded: ${err.message}`;
       return;
     }
-    if (final?.state === 'succeeded') await showResult(final);
-    else if (final?.state === 'failed') announceError(`Render failed: ${final.error || final.message}`);
-    else if (final?.state === 'cancelled') announce('Render cancelled.');
+    if (!mine()) return revokeMedia(url);
+    setMedia(url, vttUrl, srtUrl);
+    if (announceIt) announce(`Your video is ready: ${duration(final.result.duration_s)}, ${final.result.width}×${final.result.height}. The player and download links are below.`);
+    await loadCaptions(final);
+  }
+
+  async function loadCaptions(final) {
+    const mine = following(final.id);
+    captionError = '';
+    const fetched = [];
+    try {
+      for (const kind of ['vtt', 'srt']) {
+        fetched.push(final.result[`${kind}_path`] ? await api.fileUrl(final.id, kind) : '');
+      }
+    } catch (err) {
+      fetched.forEach(revokeMedia);
+      if (mine()) captionError = `The captions couldn’t be loaded: ${err.message}`;
+      return;
+    }
+    if (!mine()) return fetched.forEach(revokeMedia);
+    setMedia(videoUrl, ...fetched);
   }
 
   async function render() {
     startError = '';
-    setMedia();
-    starting = true;
-    const current = projectGuard();
     try {
-      job = await api.startRender(renderRequest(project));
-      if (!current() || destroyed) return;
-      project.lastRenderJobId = job.id;
-      announce('Render started. Progress updates will be announced; you can keep working or cancel.');
-      starting = false;
-      await follow(job.id);
+      const accepted = await submitRender(renderRequest(project));
+      if (accepted) announce('Render started. Progress updates will be announced; you can keep working or cancel.');
     } catch (err) {
+      if (destroyed) return announceError(err.message);
       startError = err.message;
       announceError(err.message);
-    } finally {
-      starting = false;
     }
   }
 
@@ -115,22 +162,6 @@
       announceError(err.message);
     }
   }
-
-  // Re-attach to the last render after a reload (it keeps running in the engine).
-  onMount(async () => {
-    const id = project.lastRenderJobId;
-    if (!id) return;
-    const current = projectGuard();
-    try {
-      const snapshot = await api.job(id);
-      if (!current() || destroyed) return;
-      job = snapshot;
-      if (job.state === 'succeeded') await showResult(job);
-      else if (job.state === 'queued' || job.state === 'running') follow(job.id);
-    } catch {
-      if (current() && project.lastRenderJobId === id) project.lastRenderJobId = null; // the engine restarted; that job is gone
-    }
-  });
 
   $effect(() => {
     if (video) video.playbackRate = Number(rate);
@@ -213,12 +244,19 @@
 
   <section class="card block" aria-labelledby="render-heading">
     <h3 id="render-heading">Render</h3>
-    <button type="button" class="primary big" onclick={render} disabled={problems.length > 0 || running || starting}
-      aria-describedby={problems.length ? 'render-blocked' : undefined}>🎬 Render video</button>
+    <button type="button" class="primary big" onclick={render} disabled={problems.length > 0 || running || submitting.render}
+      aria-describedby={problems.length ? 'render-blocked' : undefined}>🎬 {submitting.render ? 'Starting the render…' : 'Render video'}</button>
     {#if problems.length}<p class="muted" id="render-blocked">Fix the items above to enable rendering.</p>{/if}
     {#if startError}<p class="error-text">{startError}</p>{/if}
     <JobProgress {job} id="render-job" label="Render progress" oncancel={running ? cancel : null}
       stageLabels={{ audio: 'Voices and timing', compose: 'Compose and encode' }} />
+
+    {#if result && mediaError}
+      <div class="row">
+        <p class="error-text">{mediaError}</p>
+        <button type="button" onclick={() => loadVideo(job, false)}>Try loading the video again</button>
+      </div>
+    {/if}
 
     {#if result && videoUrl}
       <section class="result" aria-labelledby="result-heading">
@@ -229,6 +267,12 @@
           Your browser can’t play this video. Use the download link below.
         </video>
         <p id="result-details" class="muted">{result.width}×{result.height}, {duration(result.duration_s)}{vttUrl ? ', with captions' : ''}.</p>
+        {#if captionError}
+          <div class="row">
+            <p class="error-text">{captionError}</p>
+            <button type="button" onclick={() => loadCaptions(job)}>Try loading the captions again</button>
+          </div>
+        {/if}
         <div class="row">
           <div class="field">
             <label for="speed">Playback speed</label>

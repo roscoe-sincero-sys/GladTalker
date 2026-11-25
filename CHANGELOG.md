@@ -28,20 +28,25 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 - Engine endpoints for the UI: `GET /uploads/{name}`, `POST /script/lint`, and `POST /audio/preview` (a job that builds the render's exact soundtrack; WAV via `/jobs/{id}/files/audio`). UI responses carry a strict Content-Security-Policy and `nosniff`.
 - UI robustness:
   - Async results (import, upload, detection, render start) are dropped if New/Open replaced the project meanwhile.
+  - Renders and audio previews are started at project scope. A job the engine accepts after you've left the step is still saved, and the step follows it when shown again. Its button stays disabled while a request is on its way.
+  - A preview's timing and audio are shown together, and only for the newest preview.
+  - Auto-Fix suggestions belong to the exact text they were made for, and disappear as soon as the line changes.
+  - A finished video is shown even if its captions fail to load, and the captions have their own retry.
   - Job watchers stop on 401/403/404, back off on network errors, and close when their step closes.
   - `blob:` media URLs are released, and voice clips play one at a time.
   - The engine's limits (8 cast members, 500 lines, 1000 characters a line) are checked in the UI, and the checklist and audio preview say where to fix them.
   - Reordering keeps keyboard focus at the ends of the list.
   - Downloads keep their file names in token mode.
-- Audio previews no longer pile up on disk. Previews whose job is gone are deleted, and the 5 newest finished previews are kept.
+- Audio previews no longer pile up on disk. Each engine keeps its previews in its own locked folder: its previews whose job is gone are deleted, and its 5 newest finished ones are kept. Another engine's folder is reclaimed only after that engine has exited, so two engines can safely share one workspace.
 - UI tests:
-  - 61 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
+  - 62 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
   - Playwright end-to-end tests against a real engine:
     - axe WCAG 2.2 A/AA scans of every step in light and dark;
     - keyboard region editing, and line reordering with focus kept at the ends of the list;
     - a real audio-mix preview and autosave across reload;
     - a slow import racing an Open project;
-    - the `#token=` launch against a token-protected engine;
+    - stale Auto-Fix suggestions, a render accepted after leaving Roll, and a duplicate preview submission;
+    - the `#token=` launch against a token-protected engine, and a caption download failure in token mode;
     - Help dialog focus and 320 px reflow;
     - an opt-in real render.
 - **GladTalker Studio engine (phase 1 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio_server.py` + `src/studio/`, a local FastAPI + WebSocket backend for the upcoming *Cast → Script → Roll* UI ([docs/studio_api.md](docs/studio_api.md)):
@@ -63,7 +68,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached per file, bound to the hashed file's own size, mtime, and file ID (read from the open handle and re-checked against the path), with a racy-timestamp guard.
   - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (142 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (146 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.

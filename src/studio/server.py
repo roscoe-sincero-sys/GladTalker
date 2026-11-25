@@ -30,7 +30,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 import sys
 import time
 import uuid
@@ -50,6 +49,7 @@ from src.studio.faces import FaceDetectorService, suggest_cast
 from src.studio.ffmpeg import FFmpegError, find_ffmpeg
 from src.studio.hardware import DeviceManager, download_models, hardware_report, models_status
 from src.studio.jobs import TERMINAL_STATES, Job, JobManager, UserFacingError
+from src.studio.previews import PreviewStore
 from src.studio.schemas import (
     AudioPreviewRequest,
     CastDetectRequest,
@@ -139,10 +139,14 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
     services = services or StudioServices.default(config)
     workspace = Path(config.workspace)
 
+    # Audio previews: this engine's own folder under the workspace (see src/studio/previews.py).
+    previews = PreviewStore(workspace / "previews", keep=PREVIEW_KEEP)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
         services.jobs.shutdown()
+        previews.close()
 
     app = FastAPI(
         title="GladTalker Studio Engine",
@@ -152,6 +156,7 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
     )
     app.state.config = config
     app.state.services = services
+    app.state.previews = previews
     install_log_redaction()
     tickets = TicketStore()
     upload_limit = config.max_upload_mb * 1024 * 1024 + 64 * 1024  # file + multipart overhead
@@ -296,9 +301,7 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
         pipeline.require_ffmpeg_user_facing()
 
         def run(ctx):
-            previews = workspace / "previews"
-            prune_previews(previews, services.jobs, keep=PREVIEW_KEEP, current=ctx.job.id)
-            out_dir = previews / f"{time.strftime('%Y%m%d_%H%M%S')}_{ctx.job.id}"
+            out_dir = previews.new_folder(ctx.job.id, services.jobs)
             return pipeline.preview_audio(ctx, body, out_dir, services.tts)
 
         return services.jobs.submit("audio.preview", "Preview audio mix", run, lane="audio").snapshot()
@@ -450,33 +453,6 @@ def ui_public_paths(dist: Path) -> set[str]:
         if f.is_file():
             paths.add("/" + f.relative_to(dist).as_posix())
     return paths
-
-
-def prune_previews(previews: Path, jobs: JobManager, keep: int, current: str) -> None:
-    """Delete audio previews nobody can fetch any more, so repeated previews don't fill the disk.
-
-    A preview's WAV is only served through its (in-memory) job, so folders whose job is gone
-    (evicted, or from an earlier engine run) are removed, and of the rest only the newest
-    ``keep`` finished previews stay. Queued/running previews are never touched.
-    """
-    if not previews.is_dir():
-        return
-    known = {j.id: j for j in jobs.list()}
-    finished = []
-    for folder in previews.iterdir():
-        if not folder.is_dir():
-            continue
-        job_id = folder.name.rsplit("_", 1)[-1]
-        job = known.get(job_id)
-        if job_id == current or (job is not None and not job.done):
-            continue
-        if job is None:
-            shutil.rmtree(folder, ignore_errors=True)
-        else:
-            finished.append(folder)
-    finished.sort(key=lambda f: f.name)  # names start with a timestamp
-    for folder in finished[:max(0, len(finished) - keep)]:
-        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _with_headers(asgi_app, headers):

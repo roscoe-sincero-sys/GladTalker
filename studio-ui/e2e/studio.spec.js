@@ -28,6 +28,44 @@ async function openStudio(page) {
   return errors;
 }
 
+const tokenBase = () => `http://127.0.0.1:${Number(process.env.GLADTALKER_E2E_PORT || 7863) + 1}`;
+
+/** Holds the next request matching `pattern` until the returned release() is called. */
+async function hold(page, pattern, answer = (route) => route.continue()) {
+  let release;
+  const released = new Promise((r) => (release = r));
+  await page.route(pattern, async (route) => {
+    await released;
+    await answer(route);
+  }, { times: 1 });
+  return release;
+}
+
+/** A pretend render job `id`, so render bookkeeping can be tested without minutes of GPU time.
+ * The WebSocket ticket is refused, so the UI follows it by polling `snapshot()`. */
+async function fakeRender(page, id, snapshot) {
+  await page.route(`**/jobs/${id}/ws-ticket`, (route) => route.fulfill({ status: 503, json: { detail: 'busy' } }));
+  await page.route(`**/jobs/${id}`, (route) => route.fulfill({ json: snapshot() }));
+}
+
+const renderSnapshot = (id, state, extra = {}) => ({ id, kind: 'render', title: 'Render (Ann)', state, progress: state === 'succeeded' ? 1 : 0.2,
+  message: state === 'succeeded' ? 'Done' : 'Rendering Ann: animating frame 5 of 50', stage: 'render:Ann',
+  stages: ['audio', 'render:Ann', 'compose'], cancel_requested: false, eta_s: null, elapsed_s: 3, ...extra });
+
+async function readyToRoll(page, script = 'Ann: Hello there.') {
+  await castPortrait(page);
+  await page.getByRole('button', { name: 'Next: Script' }).click();
+  await page.getByLabel('Paste a script').fill(script);
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await page.getByRole('button', { name: 'Next: Roll' }).click();
+  await expect(page.getByText(/Everything is ready/)).toBeVisible();
+}
+
+const SRT = ['1', '00:00:00,000 --> 00:00:02,000', 'Ann: Hello there.', ''].join('\n');
+const VTT = ['WEBVTT', '', '00:00.000 --> 00:02.000', 'Ann: Hello there.', ''].join('\n');
+
+const savedProject = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('gladtalker.project.v1')));
+
 async function castPortrait(page) {
   await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
   await expect(page.getByRole('img', { name: /Scene: people_0\.png/ })).toBeVisible();
@@ -163,7 +201,7 @@ test('a slow import never lands in a project opened meanwhile', async ({ page })
 });
 
 test('token mode: the documented #token= link loads the app and authenticates it', async ({ page, request }) => {
-  const base = `http://127.0.0.1:${Number(process.env.GLADTALKER_E2E_PORT || 7863) + 1}`;
+  const base = tokenBase();
   // Without the token, the shell loads but the engine's data doesn't.
   expect((await request.get(`${base}/`)).status()).toBe(200);
   expect((await request.get(`${base}/hardware`)).status()).toBe(401);
@@ -180,6 +218,87 @@ test('token mode: the documented #token= link loads the app and authenticates it
   await expect(img).toBeVisible();
   expect(await img.evaluate((el) => el.src.startsWith('blob:') && el.naturalWidth > 0)).toBe(true);
   expect(errors).toEqual([]);
+});
+
+test('Auto-Fix suggestions disappear as soon as the line changes', async ({ page }) => {
+  await openStudio(page);
+  await castPortrait(page);
+  await page.getByRole('button', { name: 'Next: Script' }).click();
+  await page.getByLabel('Paste a script').fill("Ann: You're late.");
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Auto-Fix line 1' })).toBeVisible();
+
+  const release = await hold(page, '**/script/lint'); // the re-check of the new text is slow
+  await page.getByLabel('What is said in line 1').fill('We have plenty of time.');
+  await expect(page.getByRole('button', { name: 'Auto-Fix line 1' })).toHaveCount(0);
+  release();
+  await page.waitForTimeout(800);
+  await expect(page.getByLabel('What is said in line 1')).toHaveValue('We have plenty of time.');
+});
+
+test('a render accepted after leaving Roll is still followed when Roll is shown again', async ({ page }) => {
+  await openStudio(page);
+  await readyToRoll(page);
+  await fakeRender(page, 'fake-render-1', () => renderSnapshot('fake-render-1', 'running'));
+  const release = await hold(page, '**/render/start',
+    (route) => route.fulfill({ status: 202, json: renderSnapshot('fake-render-1', 'queued') }));
+
+  await page.getByRole('button', { name: /Render video/ }).click();
+  await expect(page.getByRole('button', { name: /Starting the render/ })).toBeDisabled();
+  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Cast/ }).click();
+  const accepted = page.waitForResponse('**/render/start');
+  release();
+  await accepted;
+
+  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Roll/ }).click();
+  await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeDisabled(); // no duplicate GPU job
+  await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fake-render-1'); // autosaved
+});
+
+test('the preview button can’t start a second preview while one is being submitted', async ({ page }) => {
+  await openStudio(page);
+  await castPortrait(page);
+  await page.getByRole('button', { name: 'Next: Script' }).click();
+  await page.getByLabel('Paste a script').fill('Ann: Hello there.');
+  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  let posts = 0;
+  page.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/audio/preview')) posts++; });
+  const release = await hold(page, '**/audio/preview');
+  await page.getByRole('button', { name: /Preview full audio mix/ }).click();
+  await expect(page.getByRole('button', { name: /Starting the preview/ })).toBeDisabled();
+  release();
+  await expect(page.getByLabel('Full audio mix')).toBeVisible({ timeout: 90_000 });
+  expect(posts).toBe(1);
+});
+
+test('token mode: a caption download failure still shows the video, and captions can be retried', async ({ page }) => {
+  await page.goto(`${tokenBase()}/#token=${E2E_TOKEN}`);
+  await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible();
+  await readyToRoll(page);
+  const result = { video_path: 'C:/out/Ann_scene.mp4', srt_path: 'C:/out/Ann_scene.srt', vtt_path: 'C:/out/Ann_scene.vtt',
+    output_dir: 'C:/out', width: 1280, height: 720, duration_s: 2, captions: [{ speaker: 'Ann', text: 'Hello there.', start_ms: 0 }] };
+  await fakeRender(page, 'fake-render-2', () => renderSnapshot('fake-render-2', 'succeeded', { result }));
+  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot('fake-render-2', 'queued') }));
+  await page.route('**/jobs/fake-render-2/files/video', (route) => route.fulfill({ body: Buffer.from('not really a video'), contentType: 'video/mp4' }));
+  await page.route('**/jobs/fake-render-2/files/srt', (route) => route.fulfill({ body: SRT }));
+  let vttCalls = 0;
+  await page.route('**/jobs/fake-render-2/files/vtt', (route) => (++vttCalls === 1
+    ? route.fulfill({ status: 503, json: { detail: 'The disk was busy.' } })
+    : route.fulfill({ body: VTT, contentType: 'text/vtt' })));
+
+  await page.getByRole('button', { name: /Render video/ }).click();
+  await expect(page.getByRole('heading', { name: 'Your video' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Download video (MP4)' })).toHaveAttribute('download', 'Ann_scene.mp4');
+  await expect(page.getByText(/The captions couldn’t be loaded: The disk was busy\./)).toBeVisible();
+  await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fake-render-2'); // autosaved
+
+  await page.getByRole('button', { name: 'Try loading the captions again' }).click();
+  await expect(page.getByRole('link', { name: 'Download captions (WebVTT)' })).toHaveAttribute('download', 'Ann_scene.vtt');
+  await expect(page.getByRole('link', { name: 'Download captions (SRT)' })).toHaveAttribute('download', 'Ann_scene.srt');
+  await expect(page.locator('video track[kind="captions"]')).toHaveCount(1);
+  await expect(page.getByText(/captions couldn’t be loaded/)).toHaveCount(0);
 });
 
 test('help dialog: Esc closes it and focus returns to Help', async ({ page }) => {

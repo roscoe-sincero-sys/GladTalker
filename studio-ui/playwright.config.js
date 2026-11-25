@@ -37,7 +37,7 @@ export default defineConfig({
       timeout: 120_000,
     },
     {
-      command: engineCommand(tokenPort, 'studio-e2e', ` --token ${E2E_TOKEN}`),
+      command: engineCommand(tokenPort, 'studio-e2e-token', ` --token ${E2E_TOKEN}`),
       cwd: repo,
       url: `http://127.0.0.1:${tokenPort}/health`,
       reuseExistingServer: true,

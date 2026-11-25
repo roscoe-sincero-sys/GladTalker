@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from src.studio import pipeline, server
 from src.studio.jobs import JobManager
+from src.studio.previews import PreviewStore
 from src.studio.schemas import AudioPreviewRequest
 from src.studio.server import DEFAULT_HOSTS, StudioConfig, StudioServices, create_app
 from tests.test_studio_server import FakeDetector, FakeDevices, FakeTTS, _write_png
@@ -149,51 +150,133 @@ class UiEndpointTests(unittest.TestCase):
 class PreviewRetentionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="gladtalker_previews_"))
+        self.root = self.tmp / "previews"
         self.jobs = JobManager(lanes={"audio": 1}, max_jobs=3)
+        self.stores = []
 
     def tearDown(self):
+        for store in self.stores:
+            store.close()
         self.jobs.shutdown()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _finished_job(self):
-        job = self.jobs.submit("audio.preview", "Preview", lambda ctx: {}, lane="audio")
+    def _store(self, **kw):
+        store = PreviewStore(self.root, **kw)
+        self.stores.append(store)
+        return store
+
+    def _finished_job(self, jobs=None):
+        job = (jobs or self.jobs).submit("audio.preview", "Preview", lambda ctx: {}, lane="audio")
         deadline = time.time() + 10
         while not job.done and time.time() < deadline:
             time.sleep(0.01)
         return job
 
-    def test_unreachable_and_old_previews_are_deleted(self):
-        previews = self.tmp / "previews"
-        orphan = previews / "20260101_000000_deadbeef0000"  # its job is gone (evicted / restart)
-        orphan.mkdir(parents=True)
-        (orphan / "preview.wav").write_bytes(b"x")
-        finished = []
-        for i in range(3):
-            job = self._finished_job()
-            folder = previews / f"2026010{i + 1}_000000_{job.id}"
-            folder.mkdir()
-            (folder / "preview.wav").write_bytes(b"x")
-            finished.append(folder)
+    @staticmethod
+    def _write(folder):
+        folder.mkdir(parents=True)
+        (folder / "preview.wav").write_bytes(b"x")
+        return folder
+
+    def test_own_unreachable_and_old_previews_are_deleted_running_ones_kept(self):
+        store = self._store(keep=1)
+        orphan = self._write(store.new_folder("deadbeef0000", self.jobs))  # its job never existed here
+        finished = [self._write(store.new_folder(self._finished_job().id, self.jobs)) for _ in range(2)]
         release = threading.Event()
         running = self.jobs.submit("audio.preview", "Preview", lambda ctx: release.wait(10), lane="audio")
-        running_dir = previews / f"20251231_000000_{running.id}"  # oldest name, but still running
-        running_dir.mkdir()
+        running_dir = self._write(store.dir / f"20000101_000000_{running.id}")  # oldest name, still running
         try:
-            server.prune_previews(previews, self.jobs, keep=1, current="current0000")
-            remaining = sorted(p.name for p in previews.iterdir())
+            store.new_folder("current00000", self.jobs)
+            remaining = sorted(p.name for p in store.dir.iterdir() if p.is_dir())
             self.assertEqual(remaining, sorted([running_dir.name, finished[-1].name]))
+            self.assertFalse(orphan.exists())
         finally:
             release.set()
 
     def test_previews_evicted_from_the_job_list_lose_their_files(self):
-        previews = self.tmp / "previews"
+        store = self._store()
         first = self._finished_job()
-        (previews / f"20260101_000000_{first.id}").mkdir(parents=True)
+        folder = self._write(store.new_folder(first.id, self.jobs))
         for _ in range(3):  # max_jobs=3 evicts the first job
             self._finished_job()
         self.assertIsNone(self.jobs.get(first.id))
-        server.prune_previews(previews, self.jobs, keep=5, current="x")
-        self.assertEqual(list(previews.iterdir()), [])
+        store.new_folder("x", self.jobs)
+        self.assertFalse(folder.exists())
+
+    def test_another_running_engine_is_never_cleaned_up(self):
+        other_jobs = JobManager(lanes={"audio": 1})
+        self.addCleanup(other_jobs.shutdown)
+        other = self._store(stale_s=0)
+        mine = self._store(stale_s=0)
+        theirs = self._write(other.new_folder(self._finished_job(other_jobs).id, other_jobs))
+        mine.new_folder("a", self.jobs)  # its jobs are unknown here, but its engine holds its lock
+        self.assertTrue(theirs.exists())
+
+    def test_a_dead_engines_folder_is_reclaimed_once_stale(self):
+        dead = PreviewStore(self.root, stale_s=0)
+        leftover = self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()  # what the OS does when that engine's process ends
+        dead._lock = None
+        young = self._store(stale_s=3600)
+        young.new_folder("b", self.jobs)
+        self.assertTrue(leftover.exists(), "a recent folder might belong to an engine still starting up")
+        self._store(stale_s=0).new_folder("c", self.jobs)
+        self.assertFalse(dead.dir.exists())
+
+    def test_clean_shutdown_removes_its_own_folder(self):
+        store = PreviewStore(self.root)
+        self._write(store.new_folder("j", self.jobs))
+        store.close()
+        self.assertFalse(store.dir.exists())
+
+
+class TwoEnginesOneWorkspaceTests(unittest.TestCase):
+    """Two engines on one workspace (two ports, or the e2e suite): a preview in one must not
+    break a preview that is still running in the other."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="gladtalker_two_"))
+        self.config = StudioConfig(workspace=self.tmp / "ws", allowed_hosts=DEFAULT_HOSTS + ["testserver"])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _app(self):
+        jobs = JobManager(lanes={"gpu": 1, "io": 1, "audio": 1})
+        return create_app(self.config, StudioServices(devices=FakeDevices(), tts=FakeTTS(),
+                                                      detector=FakeDetector(), jobs=jobs))
+
+    def test_a_running_preview_survives_the_other_engines_cleanup(self):
+        started, release = threading.Event(), threading.Event()
+
+        def fake_preview(ctx, req, out_dir, tts):
+            out_dir.mkdir(parents=True)
+            if req.script[0].text == "Slow.":
+                started.set()
+                release.wait(10)
+            (out_dir / "preview.wav").write_bytes(b"RIFF....WAVE")
+            return {"audio_path": str(out_dir / "preview.wav"), "duration_s": 1.0, "tempo": 1.0}
+
+        body = lambda text: {"cast": [{"name": "A"}], "script": [{"speaker": "A", "text": text}]}
+        with mock.patch.object(pipeline, "require_ffmpeg_user_facing", return_value="ffmpeg"),                 mock.patch.object(pipeline, "preview_audio", fake_preview),                 mock.patch.object(PreviewStore, "__init__", _no_grace(PreviewStore.__init__)),                 TestClient(self._app()) as one, TestClient(self._app()) as two:
+            slow = one.post("/audio/preview", json=body("Slow.")).json()["id"]
+            self.assertTrue(started.wait(10))
+            quick = two.post("/audio/preview", json=body("Quick.")).json()["id"]
+            self.assertEqual(_wait(two, quick)["state"], "succeeded")
+            release.set()
+            job = _wait(one, slow)
+            self.assertEqual(job["state"], "succeeded", job.get("error"))
+            self.assertEqual(one.get(f"/jobs/{slow}/files/audio").status_code, 200)
+            self.assertEqual(two.get(f"/jobs/{quick}/files/audio").status_code, 200)
+
+
+def _no_grace(init):
+    """PreviewStore without the start-up grace period, so the test exercises the lock alone."""
+
+    def wrapped(self, root, keep=5, stale_s=0):
+        init(self, root, keep=keep, stale_s=0)
+
+    return wrapped
 
 
 class _ToneTTS:

@@ -51,7 +51,11 @@ npm run e2e      # Playwright: starts an engine and drives the built dist/ in Ch
   - axe-core WCAG 2.2 A/AA scans of every step (light and dark);
   - keyboard editing, including focus after reordering at the top and bottom of the list;
   - the real audio preview and autosave;
+  - Auto-Fix suggestions hidden as soon as their line changes;
   - a slow import racing an Open project;
+  - a render accepted after leaving Roll, which Roll follows when shown again (render jobs are mocked here, so no GPU time);
+  - a duplicate preview click while one is being submitted;
+  - in token mode, a caption download failure that still shows the video and offers a retry;
   - the `#token=` launch against a second engine started with `--token`;
   - the Help dialog and 320 px reflow.
 - **Real render:** set `GLADTALKER_E2E_RENDER=1` to also render a short video (a few minutes).
