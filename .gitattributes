@@ -1,2 +1,4 @@
+# UI sources use LF everywhere so builds are byte-identical on every platform.
+studio-ui/** text=auto eol=lf
 # Built UI: store byte-for-byte (no CRLF conversion), so rebuilding shows no spurious changes.
 studio-ui/dist/** -text
