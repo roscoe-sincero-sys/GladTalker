@@ -75,7 +75,8 @@ describe('full-mix preview', () => {
     render(ScriptStep);
     await vi.waitFor(() => expect(engine.urls['00000000000a']).toBeTruthy());
     // While p1's audio is loading, the preview can't be started again.
-    expect(screen.getByRole('button', { name: /Preview full audio mix/ }).disabled).toBe(true);
+    // (Unavailable but still focusable, so pressing it never drops keyboard focus.)
+    expect(screen.getByRole('button', { name: /Preview full audio mix/ }).getAttribute('aria-disabled')).toBe('true');
 
     project.lastPreviewJobId = '00000000000b'; // a newer preview took over
     await vi.waitFor(() => expect(engine.urls['00000000000b']).toBeTruthy());
@@ -99,7 +100,7 @@ describe('full-mix preview', () => {
     await vi.waitFor(() => expect(engine.urls['00000000000b']).toBeTruthy()); // audio requested
     engine.urls['00000000000b'].resolve('blob:p2');
     await vi.waitFor(() => expect(screen.getByLabelText('Full audio mix').getAttribute('src')).toBe('blob:p2'));
-    expect(screen.getByRole('button', { name: /Preview full audio mix/ }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: /Preview full audio mix/ }).getAttribute('aria-disabled')).toBeNull();
     await new Promise((r) => setTimeout(r, 80));
     expect(live.polite).not.toMatch(/Audio mix ready/); // not announced before we know it's news
 

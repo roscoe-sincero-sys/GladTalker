@@ -48,6 +48,7 @@
   }
 
   async function preview() {
+    if (previewing) return;
     previewing = true;
     try {
       const blob = await api.previewVoice(`Hello, I'm ${member.name.trim() || 'a new character'}.`, member.semitones);
@@ -88,7 +89,7 @@
       min={engine.semitoneRange[0]} max={engine.semitoneRange[1]} step={0.5} onchange={pitchChanged}
       hint="Semitones: lower is deeper, higher is lighter." />
   </div>
-  <button type="button" onclick={preview} disabled={previewing} aria-describedby="preview-hint-{id}">
+  <button type="button" onclick={preview} aria-disabled={previewing ? 'true' : undefined} aria-describedby="preview-hint-{id}">
     <span aria-hidden="true">▶</span> {previewing ? 'Preparing…' : 'Preview voice'}
   </button>
   <p class="muted small" id="preview-hint-{id}">Plays a short sample, about 2 seconds.</p>

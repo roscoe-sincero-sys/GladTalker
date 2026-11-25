@@ -16,8 +16,9 @@
     return true;
   }
 
-  const isDisabled = (el) => el.disabled === true || el.getAttribute('aria-disabled') === 'true'
-    || Boolean(el.closest('fieldset:disabled'));
+  // Only real `disabled` takes a control out of the Tab order and pointer targets; an
+  // aria-disabled control (unavailable while busy) stays focusable and clickable.
+  const isDisabled = (el) => el.disabled === true || Boolean(el.closest('fieldset:disabled'));
 
   /** A short, readable name for an element in a test report. */
   function describe(el) {

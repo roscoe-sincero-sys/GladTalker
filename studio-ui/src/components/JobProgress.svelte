@@ -47,7 +47,8 @@
       <p class="muted">Cancelled.</p>
     {/if}
     {#if running && oncancel}
-      <button type="button" class="danger" onclick={oncancel} disabled={job.cancel_requested}>
+      <button type="button" class="danger" onclick={() => { if (!job.cancel_requested) oncancel(); }}
+        aria-disabled={job.cancel_requested ? 'true' : undefined}>
         {job.cancel_requested ? 'Cancelling…' : 'Cancel'}
       </button>
     {/if}

@@ -16,6 +16,8 @@
   const models = $derived(engine.models);
   const missing = $derived(models ? models.files.filter((f) => !f.ready) : []);
 
+  const downloading = $derived(Boolean(job && (job.state === 'queued' || job.state === 'running')));
+
   async function download() {
     error = '';
     try {
@@ -61,8 +63,8 @@
     </li>
   </ul>
   {#if models && !models.complete}
-    <button type="button" class="primary" onclick={download}
-      disabled={job && (job.state === 'queued' || job.state === 'running')}>Download models (about 2.5 GB)</button>
+    <button type="button" class="primary" onclick={() => { if (!downloading) download(); }}
+      aria-disabled={downloading ? 'true' : undefined}>Download models (about 2.5 GB)</button>
   {/if}
   {#if error}<p class="error-text">{error}</p>{/if}
   <JobProgress {job} id="models-job" label="Model download" oncancel={job ? () => api.cancelJob(job.id) : null} />

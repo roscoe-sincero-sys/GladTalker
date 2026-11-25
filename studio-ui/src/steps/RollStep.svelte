@@ -165,6 +165,7 @@
   }
 
   async function render() {
+    if (problems.length || running || checking || submitting.render) return;
     startError = '';
     try {
       const accepted = await submitRender(renderRequest(project));
@@ -271,7 +272,10 @@
 
   <section class="card block" aria-labelledby="render-heading">
     <h3 id="render-heading">Render</h3>
-    <button type="button" class="primary big" onclick={render} disabled={problems.length > 0 || running || checking || submitting.render}
+    <!-- Disabled while there are problems to fix; only marked unavailable (keeping focus) while
+         the render it just started is being accepted or runs. -->
+    <button type="button" class="primary big" onclick={render} disabled={problems.length > 0}
+      aria-disabled={running || checking || submitting.render ? 'true' : undefined}
       aria-describedby={problems.length ? 'render-blocked' : undefined}>🎬 {submitting.render ? 'Starting the render…' : 'Render video'}</button>
     {#if problems.length}<p class="muted" id="render-blocked">Fix the items under “Ready to render?” to enable rendering.</p>{/if}
     {#if checking}<p class="muted" role="status">Checking on the last render…</p>{/if}

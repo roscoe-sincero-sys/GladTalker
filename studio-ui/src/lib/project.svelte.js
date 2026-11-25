@@ -118,6 +118,20 @@ export function projectGuard() {
 }
 
 /** Replace the whole project in place (keeps the reactive object identity). */
+/** Does this project hold anything a user made or chose: a scene, cast, script, or any setting
+ * changed from the defaults? New and Open ask before replacing such a project (WCAG 3.3.4).
+ * Bookkeeping (detections, the last job ids) doesn't count on its own. */
+export function hasWork(p) {
+  const same = (a, b) => {
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    return [...keys].every((k) => same(a[k], b[k]));
+  };
+  const blank = defaultProject();
+  return ['image', 'cast', 'script', 'pacing', 'output', 'quality', 'captions'].some((k) => !same(p[k], blank[k]));
+}
+
 export function replaceProject(next) {
   const normalized = normalizeProject(next);
   generation++;

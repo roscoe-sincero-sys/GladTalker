@@ -31,13 +31,13 @@
 <div class="number-field">
   <label for={id} class:visually-hidden={hideLabel}>{label}</label>
   <div class="controls">
-    <button type="button" class="icon" aria-label="Decrease {label}" disabled={value <= min}
+    <button type="button" class="icon" aria-label="Decrease {label}" aria-disabled={value <= min ? 'true' : undefined}
       onclick={() => set(value - step)}>−</button>
     <input {id} type="number" inputmode="decimal" {min} {max} {step} value={value}
       aria-describedby={describedBy} aria-invalid={error ? 'true' : undefined}
       onchange={(e) => set(e.currentTarget.value)} />
     {#if unit}<span class="unit" aria-hidden="true">{unit}</span>{/if}
-    <button type="button" class="icon" aria-label="Increase {label}" disabled={value >= max}
+    <button type="button" class="icon" aria-label="Increase {label}" aria-disabled={value >= max ? 'true' : undefined}
       onclick={() => set(value + step)}>+</button>
   </div>
   {#if hint}<p class="hint" id="{id}-hint">{hint}</p>{/if}

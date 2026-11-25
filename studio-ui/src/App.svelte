@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { STEPS, engine, nav, connectEngine, goTo, deviceLabel } from './lib/app-state.svelte.js';
-  import { project, saveProjectText, replaceProject, defaultProject } from './lib/project.svelte.js';
+  import { project, saveProjectText, replaceProject, defaultProject, normalizeProject, hasWork } from './lib/project.svelte.js';
   import { live, announce, announceError } from './lib/announce.svelte.js';
   import { renderProblems, problemsForStep } from './lib/validate.js';
   import Stepper from './components/Stepper.svelte';
@@ -44,6 +44,23 @@
     saveTimer = setTimeout(flushSave, 300);
     return () => clearTimeout(saveTimer);
   });
+  // The sticky header and footer can wrap to more lines (a long device name, a narrow or zoomed
+  // window): keep the scroll padding that keeps focus clear of them equal to their real heights
+  // (WCAG 2.4.11).
+  let header;
+  let footer;
+  onMount(() => {
+    const root = document.documentElement;
+    const measure = () => {
+      root.style.setProperty('--header-space', `${header?.offsetHeight ?? 0}px`);
+      root.style.setProperty('--footer-space', `${footer?.offsetHeight ?? 0}px`);
+    };
+    const observer = new ResizeObserver(measure);
+    for (const bar of [header, footer]) if (bar) observer.observe(bar);
+    measure();
+    return () => observer.disconnect();
+  });
+
   onMount(() => {
     const onHidden = () => { if (document.visibilityState === 'hidden') flushSave(); };
     window.addEventListener('pagehide', flushSave);
@@ -89,14 +106,15 @@
 
   async function openFile(file) {
     if (!file) return;
-    // Like New: opening replaces the current cast and script, so ask first (WCAG 3.3.4).
-    if ((project.cast.length || project.script.length)
-      && !confirm(`Open ${file.name}? It replaces the current cast and script. Save the project first if you want to keep it.`)) {
-      openInput.value = '';
-      return;
-    }
     try {
-      replaceProject(JSON.parse(await file.text()));
+      // Read and check the file first (an unreadable one changes nothing, so no question), then,
+      // like New, ask before replacing a project that holds any work (WCAG 3.3.4).
+      const next = normalizeProject(JSON.parse(await file.text()));
+      if (hasWork(project)
+        && !confirm(`Open ${file.name}? It replaces the current project (its scene, cast, script, and settings). Save the project first if you want to keep it.`)) {
+        return;
+      }
+      replaceProject(next);
       announce(`Opened ${file.name}: ${project.cast.length} cast members, ${project.script.length} lines.`);
       goTo('cast');
     } catch (err) {
@@ -107,8 +125,9 @@
   }
 
   function newProject() {
-    if (project.cast.length || project.script.length) {
-      if (!confirm('Start a new project? The current cast and script will be cleared. Save the project first if you want to keep it.')) return;
+    if (hasWork(project)
+      && !confirm('Start a new project? The current scene, cast, script, and settings will be cleared. Save the project first if you want to keep it.')) {
+      return;
     }
     replaceProject(defaultProject());
     announce('Started a new project.');
@@ -119,7 +138,7 @@
 <a class="skip-link" href="#main">Skip to the current step</a>
 
 <div class="app">
-  <header class="app-header">
+  <header class="app-header" bind:this={header}>
     <div class="brand">
       <h1>GladTalker Studio</h1>
       {#if engine.version}<span class="version">v{engine.version}</span>{/if}
@@ -168,7 +187,7 @@
     {/if}
   </main>
 
-  <footer class="app-footer">
+  <footer class="app-footer" bind:this={footer}>
     <p class="status">
       <span>Computer: {deviceLabel()}</span>
       {#if engine.models}<span> · Models: {engine.models.ready}/{engine.models.total} ready</span>{/if}

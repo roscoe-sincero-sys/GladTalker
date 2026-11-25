@@ -88,6 +88,7 @@
   });
 
   async function importScript(mode) {
+    if (importing) return;
     importMessage = '';
     unknownSpeakers = [];
     if (!pasted.trim()) {
@@ -199,6 +200,7 @@
   }
 
   async function previewMix() {
+    if (previewBlockers.length || previewBusy) return;
     previewError = '';
     try {
       const accepted = await submitPreview(audioPreviewRequest(project));
@@ -271,18 +273,18 @@
       <p class="hint" id="script-import-hint">One line per speech, starting with the speaker’s name and a colon, for example “Brain: Click it.”. Lines without a name continue the previous line.</p>
     </div>
     <div class="row">
-      <button type="button" class="primary" onclick={() => importScript('replace')} disabled={importing}>
+      <button type="button" class="primary" onclick={() => importScript('replace')} aria-disabled={importing ? 'true' : undefined}>
         {project.script.length ? 'Import, replacing all lines' : 'Import'}
       </button>
       {#if project.script.length}
-        <button type="button" onclick={() => importScript('append')} disabled={importing}>Import, adding to the end</button>
+        <button type="button" onclick={() => importScript('append')} aria-disabled={importing ? 'true' : undefined}>Import, adding to the end</button>
       {/if}
     </div>
     {#if importMessage}<p class="import-msg">{importMessage}</p>{/if}
     {#if unknownSpeakers.length}
       <div class="row">
         {#each unknownSpeakers as name (name)}
-          <button type="button" onclick={() => addToCast(name)} disabled={castFull}
+          <button type="button" onclick={() => addToCast(name)} aria-disabled={castFull ? 'true' : undefined}
             aria-describedby={castFull ? 'cast-full-hint' : undefined}>Add “{name}” to the cast</button>
         {/each}
       </div>
@@ -328,7 +330,7 @@
       {/if}
 
       <div class="preview">
-        <button type="button" onclick={previewMix} disabled={previewBlockers.length > 0 || previewBusy}
+        <button type="button" onclick={previewMix} disabled={previewBlockers.length > 0} aria-disabled={previewBusy ? 'true' : undefined}
           aria-describedby="preview-mix-hint">▶ {submitting.preview ? 'Starting the preview…' : 'Preview full audio mix'}</button>
         {#if previewBlockers.length}
           <div class="hint" id="preview-mix-hint">

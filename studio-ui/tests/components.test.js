@@ -26,7 +26,14 @@ describe('NumberField', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Increase Pitch' }));
     expect(onchange).toHaveBeenLastCalledWith(6);
     expect(input.value).toBe('6');
-    expect(screen.getByRole('button', { name: 'Increase Pitch' }).disabled).toBe(true);
+    // At the limit it is unavailable but keeps focus (aria-disabled, not disabled), and does nothing.
+    const increase = screen.getByRole('button', { name: 'Increase Pitch' });
+    expect(increase.getAttribute('aria-disabled')).toBe('true');
+    expect(increase.disabled).toBe(false);
+    increase.focus();
+    await fireEvent.click(increase);
+    expect(input.value).toBe('6');
+    expect(document.activeElement).toBe(increase);
     input.value = '-20';
     await fireEvent.change(input);
     expect(onchange).toHaveBeenLastCalledWith(-6);

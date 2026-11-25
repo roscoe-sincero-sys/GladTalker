@@ -43,9 +43,10 @@
 *, *::before, *::after { box-sizing: border-box; }
 
 html {
-  /* Keep the focused element clear of the sticky header and footer (WCAG 2.4.11). */
-  scroll-padding-top: calc(var(--header-h) + 1rem);
-  scroll-padding-bottom: calc(var(--footer-h) + 1rem);
+  /* Keep the focused element clear of the sticky header and footer (WCAG 2.4.11). App.svelte
+     sets --header-space and --footer-space to their measured heights (they can wrap). */
+  scroll-padding-top: calc(var(--header-space, var(--header-h)) + 1rem);
+  scroll-padding-bottom: calc(var(--footer-space, var(--footer-h)) + 1rem);
 }
 
 body {
@@ -101,12 +102,14 @@ button, .button {
   text-decoration: none;
   line-height: 1.2;
 }
-button:hover:not(:disabled), .button:hover { background: var(--surface-2); }
-button:disabled { cursor: not-allowed; opacity: 0.65; }
+button:hover:not(:disabled, [aria-disabled='true']), .button:hover { /* same specificity as :not(:disabled) */ background: var(--surface-2); }
+/* aria-disabled: unavailable while busy or at a limit, but still focusable, so pressing it never
+   drops keyboard focus to the page (WCAG 2.4.3). It looks the same as disabled. */
+button:disabled, button[aria-disabled='true'], input[type='file'][aria-disabled='true'] { cursor: not-allowed; opacity: 0.65; }
 button.primary, .button.primary {
   background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600;
 }
-button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.primary:hover:not(:disabled, [aria-disabled='true']) { filter: brightness(1.08); background: var(--accent); }
 button.danger { color: var(--error); border-color: var(--error); background: transparent; }
 button.icon { padding: 0.35rem; }
 button[aria-pressed='true'] { background: var(--surface-2); border-width: 2px; }
@@ -188,8 +191,12 @@ main:focus { outline: none; }
 @media (max-width: 30rem) {
   main { padding: 0.75rem; }
   .app-header, .app-footer { padding: 0.5rem 0.75rem; }
-  /* Sticky bars would cover too much of a short/narrow viewport at 200%+ zoom. */
+}
+/* Sticky bars would cover too much of a narrow or short window (200 %+ zoom): there they scroll
+   with the page. */
+@media (max-width: 30rem), (max-height: 30rem) {
   .app-header, .app-footer { position: static; }
+  html { scroll-padding: 1rem; }
 }
 
 /* ---- Motion & forced colors ------------------------------------------------------------- */

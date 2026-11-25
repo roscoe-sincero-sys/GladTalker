@@ -35,6 +35,7 @@
       <tr><td>Region on the stage</td><td><kbd>Alt</kbd>+<kbd>Arrow</kbd> keys</td><td>Resize the region 1 px (<kbd>Shift</kbd>: 10 px)</td></tr>
       <tr><td>Dialogue line</td><td><kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>Alt</kbd>+<kbd>↓</kbd></td><td>Move the line up or down</td></tr>
       <tr><td>Dialog</td><td><kbd>Esc</kbd></td><td>Close</td></tr>
+      <tr><td>Anywhere</td><td><kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>−</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Make everything bigger, smaller, or the normal size</td></tr>
     </tbody>
   </table>
   <p>Shortcuts only work while that control has focus, and every one has a button or field that does the same thing, so nothing needs a mouse, dragging, or a shortcut.</p>

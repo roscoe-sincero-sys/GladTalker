@@ -222,11 +222,19 @@ test('if the app crashes, its engine still shuts itself down', async () => {
   try { fs.rmSync(profile.root, { recursive: true, force: true }); } catch { /* WebView2 may still be letting go */ }
 });
 
+/** Types real keystrokes into the app's window (only if it is in front; see send-keys.ps1). */
+function sendKeys(appPid, keys, times = 1) {
+  execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    path.join(import.meta.dirname, 'send-keys.ps1'), '-AppPid', String(appPid), '-Keys', keys, '-Times', String(times)], { encoding: 'utf-8' });
+}
+
 /** What Windows UI Automation (Narrator, NVDA, JAWS) exposes for the app's window. */
 function uiaTree(appPid) {
   const out = execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
     path.join(import.meta.dirname, 'uia-tree.ps1'), '-AppPid', String(appPid)], { encoding: 'utf-8' });
-  const parsed = JSON.parse(out.trim() || '[]');
+  // Windows PowerShell 5.1's ConvertTo-Json leaves some control characters in names unescaped;
+  // the output is one line, so any control character is inside a string and can become a space.
+  const parsed = JSON.parse(out.trim().replace(/[\u0000-\u001f]/g, ' ') || '[]');
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
@@ -263,6 +271,33 @@ test('screen readers get named controls, headings, and landmarks through UI Auto
     const CONTROLS = new Set(['Button', 'Edit', 'ComboBox', 'CheckBox', 'RadioButton', 'Hyperlink', 'Spinner', 'Slider', 'List', 'ListItem']);
     const unnamed = tree.filter((e) => e.focusable && e.enabled && CONTROLS.has(e.type) && !String(e.name || '').trim());
     expect(unnamed, 'focusable controls without a name').toEqual([]);
+  } finally {
+    await closeApp(launched);
+  }
+  fs.rmSync(profile.root, { recursive: true, force: true });
+});
+
+test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (WCAG2ICT 1.4.4)', async () => {
+  test.setTimeout(6 * 60_000);
+  const profile = newProfile();
+  const launched = await launchApp(profile);
+  const { app, page } = launched;
+  try {
+    await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
+    const layout = () => page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, ratio: devicePixelRatio }));
+    const normal = await layout();
+    // WebView2's zoom steps: 110, 125, 150, 175, 200 %. Zoom only answers real keyboard input
+    // (not keys sent over the DevTools protocol), so these are typed into the app's window.
+    sendKeys(app.pid, '^{ADD}', 5);
+    await expect.poll(async () => (await layout()).width).toBeLessThanOrEqual(Math.ceil(normal.width / 2) + 2);
+    const zoomed = await layout();
+    expect(zoomed.ratio).toBeCloseTo(normal.ratio * 2, 1);
+    expect(zoomed.scrollWidth, 'no horizontal scrolling at 200 %').toBeLessThanOrEqual(zoomed.width);
+    await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
+    await page.getByRole('button', { name: 'Next: Script' }).click(); // still works
+    await expect(page.getByRole('heading', { name: 'Step 2 of 3: Script' })).toBeVisible();
+    sendKeys(app.pid, '^0');
+    await expect.poll(async () => (await layout()).width).toBe(normal.width);
   } finally {
     await closeApp(launched);
   }

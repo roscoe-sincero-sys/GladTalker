@@ -90,7 +90,8 @@ npm run tauri:build   # release build + installer (Windows: src-tauri/target/rel
   - another profile's draft is untouched by a test run;
   - closing the app stops the engine;
   - killing the app stops the engine too;
-  - Windows UI Automation (what Narrator, NVDA, and JAWS read) exposes named controls, the step headings, the landmarks, and the skip link (`e2e-desktop/uia-tree.ps1`).
+  - Windows UI Automation (what Narrator, NVDA, and JAWS read) exposes named controls, the step headings, the landmarks, and the skip link (`e2e-desktop/uia-tree.ps1`);
+  - real Ctrl+Plus key presses zoom the app to 200 %, and it still fits and works. `e2e-desktop/send-keys.ps1` types them only when the app window is in front, so keys never go to another program. Don't use the keyboard while this test runs.
 
   Set `GLADTALKER_DESKTOP_EXE` to test another build.
 
@@ -106,13 +107,13 @@ npm run e2e      # Playwright: starts an engine and drives the built dist/ in Ch
 ```
 
 - **Setup:** `npm run e2e` needs a one-time `npx playwright install chromium`. It uses `../venv` by default; set `GLADTALKER_PYTHON=../venv-dml/Scripts/python.exe` for the DirectML venv.
-- **The WCAG audit** (`e2e/wcag-audit.spec.js`, 109 tests): every screen state (each step, Help, first-run setup, engine offline), checked at 1280 × 880, at 200 % zoom (640 × 440), and at 400 % zoom (320 × 256), as applicable. It covers:
+- **The WCAG audit** (`e2e/wcag-audit.spec.js`, 130 tests): every screen state (each step, a finished video, Help, first-run setup, engine offline), with a long GPU name that wraps the footer. Where size matters, it checks at 1280 × 880 and at the layouts that 150 %, 200 %, and 400 % zoom produce. It covers:
   - axe in light, dark, and forced colours;
   - Tab reaching every control in document order, with no trap, a visible focus ring with 3:1 contrast, and focus never hidden by the sticky header or footer;
   - 24 px targets, reflow, text spacing, and 3:1 boundaries for form fields;
   - no motion with reduced motion, no single-key shortcuts, and Help in the same place on every screen;
   - errors tied to their fields, confirmation before work is replaced, and autosave that keeps an edit made just before closing;
-  - status messages, and the whole workflow done with the keyboard alone.
+  - status messages, with focus staying on the control that was used, and the whole workflow done with the keyboard alone.
 
   It runs in parallel: `npx playwright test e2e/wcag-audit.spec.js --workers=4` takes about 2 minutes.
 - **What else it covers:**

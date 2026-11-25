@@ -6,7 +6,7 @@
 // desktop window's size, at 200 % zoom, and at 400 % zoom (320 × 256 CSS px).
 import { test, expect } from '@playwright/test';
 import path from 'node:path';
-import { AXE, WCAG_TAGS, openStudio, castPortrait, readyToRoll, fakeRender, renderSnapshot, savedProject } from './helpers.js';
+import { AXE, WCAG_TAGS, PORTRAIT, openStudio, castPortrait, readyToRoll, fakeRender, renderSnapshot, savedProject } from './helpers.js';
 
 const IN_PAGE = path.resolve(import.meta.dirname, 'wcag-in-page.js');
 
@@ -18,9 +18,21 @@ test.describe.configure({ mode: 'parallel' });
 
 const VIEWPORTS = {
   desktop: { width: 1280, height: 880 }, // the app's default window
-  zoom200: { width: 640, height: 440 }, // the same window at 200 % (1.4.4)
+  zoom150: { width: 853, height: 587 }, // the same window at 150 %
+  zoom200: { width: 640, height: 440 }, // … at 200 % (1.4.4)
   zoom400: { width: 320, height: 256 }, // 1280 × 1024 at 400 %: the reflow size (1.4.10)
 };
+
+// A real GPU's name is long and wraps the footer at some sizes; the CPU fallback ("CPU") doesn't.
+// Every scenario uses the long one, so the results don't depend on the machine running them.
+const LONG_DEVICE = 'AMD Radeon RX 6550M Graphics (DirectML, adapter 0)';
+async function routeHardware(page, edit = (hardware) => hardware) {
+  await page.route('**/hardware', async (route) => {
+    const real = await (await route.fetch()).json();
+    real.device = { ...real.device, label: LONG_DEVICE };
+    await route.fulfill({ json: edit(real) });
+  });
+}
 
 // Pointer-only targets that aren't controls: the stage regions' resize handles. Their function
 // (resizing) is also offered by the W/H steppers and Snap to face / Expand to tile, which meet
@@ -64,19 +76,29 @@ const SCENARIOS = {
   },
   'Roll, ready': async (page) => { await openStudio(page); await readyToRoll(page); },
   'Roll, rendering': async (page) => { await openStudio(page); await readyToRoll(page); await startFakeRender(page); },
+  'Roll, finished render': async (page) => {
+    // A finished render: the player with captions, the transcript, and the downloads.
+    await openStudio(page);
+    await readyToRoll(page);
+    const done = renderSnapshot('fa00000000d1', 'succeeded', { result: { duration_s: 2, width: 1280, height: 720,
+      video_path: 'C:/ws/renders/fa00000000d1/Ann.mp4', vtt_path: 'C:/ws/renders/fa00000000d1/Ann.vtt',
+      srt_path: 'C:/ws/renders/fa00000000d1/Ann.srt', captions: [{ speaker: 'Ann', text: 'Hello there.', start_ms: 0, end_ms: 2000 }] } });
+    await fakeRender(page, 'fa00000000d1', () => done);
+    await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot('fa00000000d1', 'queued') }));
+    await page.route('**/jobs/fa00000000d1/files/**', (route) => route.fulfill({ status: 200, contentType: 'text/plain', body: '' }));
+    await page.getByRole('button', { name: /Render video/ }).click();
+    await expect(page.getByRole('heading', { name: 'Your video' })).toBeVisible();
+    await page.getByText('Transcript').click(); // open it, so its contents are audited too
+  },
   'Help dialog': async (page) => {
     await openStudio(page);
     await page.getByRole('button', { name: /Help/ }).click();
     await expect(page.getByRole('dialog', { name: 'Help' })).toBeVisible();
   },
   'First-run setup': async (page) => {
-    await page.route('**/hardware', async (route) => {
-      const real = await (await route.fetch()).json();
-      real.ffmpeg = { ...real.ffmpeg, available: false };
-      real.models = { ...real.models, complete: false, ready: real.models.total - 2,
-        files: real.models.files.map((f, i) => (i < 2 ? { ...f, ready: false } : f)) };
-      await route.fulfill({ json: real });
-    });
+    await routeHardware(page, (real) => ({ ...real, ffmpeg: { ...real.ffmpeg, available: false },
+      models: { ...real.models, complete: false, ready: real.models.total - 2,
+        files: real.models.files.map((f, i) => (i < 2 ? { ...f, ready: false } : f)) } }));
     await openStudio(page);
     await expect(page.getByRole('heading', { name: 'Setup', exact: true })).toBeVisible();
   },
@@ -97,6 +119,7 @@ async function open(page, name, { viewport = VIEWPORTS.desktop, colorScheme = 'l
   }
   await page.setViewportSize(viewport);
   await page.emulateMedia({ colorScheme, forcedColors, reducedMotion });
+  await routeHardware(page);
   await SCENARIOS[name](page);
   await inject(page);
 }
@@ -195,8 +218,8 @@ test.describe('axe-core in every state, light, dark, and forced colours (1.1.1, 
 test.describe('keyboard: everything reachable, no traps, a visible and unobscured focus', () => {
   const cases = [
     ...Object.keys(SCENARIOS).map((name) => [name, 'desktop']),
-    ...['Cast, one cast member', 'Script, with a pronunciation suggestion', 'Roll, rendering', 'Help dialog', 'First-run setup']
-      .flatMap((name) => [[name, 'zoom200'], [name, 'zoom400']]),
+    ...['Cast, one cast member', 'Script, with a pronunciation suggestion', 'Roll, ready', 'Roll, rendering', 'Roll, finished render', 'Help dialog', 'First-run setup']
+      .flatMap((name) => [[name, 'zoom150'], [name, 'zoom200'], [name, 'zoom400']]),
   ];
   for (const [name, size] of cases) {
     test(`${name} at ${size} (2.1.1, 2.1.2, 2.4.3, 2.4.7, 2.4.11, 1.4.11)`, async ({ page }) => {
@@ -400,24 +423,55 @@ test.describe('predictable and input assistance', () => {
     await expect(page.getByText('Fix the items under “Ready to render?” to enable rendering.')).toBeVisible();
   });
 
-  test('opening or starting a project over unsaved work asks first, and No keeps it (3.3.4)', async ({ page }) => {
-    await open(page, 'Cast, one cast member');
+  test('replacing a project with any work in it asks first, and No keeps it as it was (3.3.4)', async ({ page }) => {
     const other = { name: 'other.gladtalker.json', mimeType: 'application/json',
       buffer: Buffer.from(JSON.stringify({ version: 1, cast: [{ id: 'cb', name: 'Bea', region: { x: 0, y: 0, w: 64, h: 64 } }], script: [] })) };
-    const messages = [];
-    for (const answer of ['dismiss', 'accept']) {
-      page.once('dialog', (d) => { messages.push(d.message()); return answer === 'accept' ? d.accept() : d.dismiss(); });
+    const openOther = async () => {
       const chooser = page.waitForEvent('filechooser');
       await page.getByRole('button', { name: 'Open…' }).click();
       await (await chooser).setFiles(other);
-      await expect(page.getByRole('region', { name: /Cast \(1\)/ })).toBeVisible();
-      await expect(page.getByLabel('Name', { exact: true })).toHaveValue(answer === 'accept' ? 'Bea' : 'Ann');
+    };
+    const stored = () => page.evaluate(() => localStorage.getItem('gladtalker.project.v1'));
+    // Any work counts: a cast, a scene on its own, or just a changed setting.
+    const drafts = {
+      'a cast member': async () => { await open(page, 'Cast, one cast member'); },
+      'only a scene': async () => {
+        await open(page, 'Cast, empty');
+        await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
+        await expect(page.getByRole('img', { name: /Scene: people_0\.png/ })).toBeVisible();
+      },
+      'only a changed setting': async () => {
+        await open(page, 'Cast, empty');
+        await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Roll/ }).click();
+        await page.getByRole('radio', { name: /9:16 Vertical/ }).check();
+      },
+    };
+    for (const [what, make] of Object.entries(drafts)) {
+      for (const action of ['Open…', 'New']) {
+        await make();
+        await settled(page);
+        const before = await stored();
+        let asked = null;
+        page.once('dialog', (d) => { asked = d.message(); return d.dismiss(); });
+        if (action === 'Open…') await openOther();
+        else await page.getByRole('button', { name: 'New', exact: true }).click();
+        await expect.poll(() => asked, { message: `${action} over ${what} asks first` }).not.toBeNull();
+        expect(asked).toMatch(/scene, cast, script, and settings/);
+        await settled(page);
+        expect(await stored(), `${action} declined over ${what}: the draft is unchanged`).toBe(before);
+      }
     }
-    expect(messages[0]).toMatch(/replaces the current cast and script/);
-    page.once('dialog', (d) => { messages.push(d.message()); return d.dismiss(); });
-    await page.getByRole('button', { name: 'New', exact: true }).click();
-    expect(messages[2]).toMatch(/Start a new project\?/);
+    // Yes replaces it; a blank project is replaced without a question.
+    await open(page, 'Cast, one cast member');
+    page.once('dialog', (d) => d.accept());
+    await openOther();
     await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Bea');
+    await open(page, 'Cast, empty');
+    let questions = 0;
+    page.on('dialog', (d) => { questions += 1; return d.dismiss(); });
+    await openOther();
+    await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Bea');
+    expect(questions).toBe(0);
   });
 
   test('nothing has to be entered twice: the project survives a reload (3.3.7)', async ({ page }) => {
@@ -510,19 +564,58 @@ test.describe('operable without a pointer or without dragging (2.1.1, 2.5.1, 2.5
 });
 
 test.describe('status messages (4.1.3)', () => {
-  test('results are announced through live regions without moving focus', async ({ page }) => {
+  test('results and errors are announced while focus stays on the control that was used', async ({ page }) => {
     await open(page, 'Cast, empty');
     const polite = page.locator('[role="status"][aria-live="polite"]').last();
-    await castPortrait(page);
-    await expect(polite).toHaveText(/found|detected|cast/i);
-    const focused = await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName);
+    const assertive = page.locator('[role="alert"][aria-live="assertive"]').last();
+    const hasFocus = (control) => control.evaluate((el) => el === document.activeElement);
+    // Use a control with the keyboard, wait for its result to be announced, and check that focus
+    // never left it, while the work ran and when the result arrived.
+    async function useAndHear(control, region, text) {
+      const element = await control.elementHandle(); // the same button, even if its label changes
+      await element.focus();
+      await page.keyboard.press('Enter');
+      await expect(region).toHaveText(text);
+      expect(await element.evaluate((el) => el === document.activeElement),
+        `focus stayed on the control after "${await region.textContent()}"`).toBe(true);
+    }
+
+    await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
+    await expect(polite).toHaveText(/Scene loaded: people_0\.png/);
+    await useAndHear(page.getByRole('button', { name: /Auto-Detect Cast/ }), polite, /Added 1 cast member/);
+    await page.getByLabel('Name', { exact: true }).fill('Ann');
+
     await page.getByRole('button', { name: 'Next: Script' }).click();
     await page.getByLabel('Paste a script').fill('Ann: Hello there.');
-    await page.getByRole('button', { name: 'Import', exact: true }).click();
-    await expect(polite).toHaveText(/line|imported/i);
+    await useAndHear(page.getByRole('button', { name: 'Import', exact: true }), polite, /Imported 1 line/);
+
+    // A render the engine reports as running, then as finished.
+    let state = 'running';
+    await fakeRender(page, 'fa00000000c1', () => renderSnapshot('fa00000000c1', state, state === 'succeeded'
+      ? { result: { duration_s: 2, width: 1280, height: 720, video_path: 'out.mp4', captions: [] } }
+      : state === 'failed' ? { error: 'FFmpeg could not write the file: the disk is full.' } : {}));
+    await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot('fa00000000c1', 'queued') }));
     await page.getByRole('button', { name: 'Next: Roll' }).click();
-    await startFakeRender(page);
-    await expect(polite).toHaveText(/Render started/);
-    expect(focused).toBeTruthy();
+    const render = page.getByRole('button', { name: /Render video/ });
+    await useAndHear(render, polite, /Render started/);
+    const fileName = page.getByLabel(/File name/);
+    await fileName.focus(); // the user carries on with something else while it renders
+    state = 'succeeded';
+    await expect(polite).toHaveText(/Your video is ready: 2 s, 1280×720/);
+    expect(await hasFocus(fileName)).toBe(true);
+
+    // A failed render is announced as an alert, again without moving focus.
+    await page.unroute('**/jobs/fa00000000c1');
+    await page.unroute('**/jobs/fa00000000c1/ws-ticket');
+    state = 'failed';
+    await fakeRender(page, 'fa00000000c2', () => renderSnapshot('fa00000000c2', state, { error: 'FFmpeg could not write the file: the disk is full.' }));
+    await page.unroute('**/render/start');
+    await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot('fa00000000c2', 'running') }));
+    state = 'running';
+    await useAndHear(render, polite, /Render started/);
+    await fileName.focus();
+    state = 'failed';
+    await expect(assertive).toHaveText(/Render failed: FFmpeg could not write the file/);
+    expect(await hasFocus(fileName)).toBe(true);
   });
 });
