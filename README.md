@@ -1,322 +1,194 @@
-> **GladTalker** is a fork of [OpenTalker/SadTalker](https://github.com/OpenTalker/SadTalker), licensed under the [Apache License 2.0](LICENSE). All original copyright and license notices are retained. Changes made in this fork are noted in the commit history.
+# GladTalker Studio
 
-<div align="center">
+**GladTalker** is a fork of [OpenTalker/SadTalker](https://github.com/OpenTalker/SadTalker), licensed under the [Apache License 2.0](LICENSE). All original copyright and license notices are retained. Changes made in this fork are noted in the commit history.
 
-<img src='https://user-images.githubusercontent.com/4397546/229094115-862c747e-7397-4b54-ba4a-bd368bfe2e0f.png' width='500px'/>
+---
 
+**GladTalker Studio** turns a picture and a written script into a talking video—right on your own computer. You can animate a single portrait, a video-call screenshot with several people, or a comic panel, give each character their own voice, and create closed captions automatically. Everything runs locally on your machine, so your pictures and scripts stay private.
 
-<!--<h2> 😭 SadTalker： <span style="font-size:12px">Learning Realistic 3D Motion Coefficients for Stylized Audio-Driven Single Image Talking Face Animation </span> </h2> -->
+---
 
-  <a href='https://arxiv.org/abs/2211.12194'><img src='https://img.shields.io/badge/ArXiv-PDF-red'></a> &nbsp; <a href='https://sadtalker.github.io'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Winfredy/SadTalker/blob/main/quick_demo.ipynb) &nbsp; [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/vinthony/SadTalker) &nbsp; [![sd webui-colab](https://img.shields.io/badge/Automatic1111-Colab-green)](https://colab.research.google.com/github/camenduru/stable-diffusion-webui-colab/blob/main/video/stable/stable_diffusion_1_5_video_webui_colab.ipynb) &nbsp; <br> [![Replicate](https://replicate.com/cjwbw/sadtalker/badge)](https://replicate.com/cjwbw/sadtalker) [![Discord](https://dcbadge.vercel.app/api/server/rrayYqZ4tf?style=flat)](https://discord.gg/rrayYqZ4tf)
+## Before You Start
 
-<div>
-    <a target='_blank'>Wenxuan Zhang <sup>*,1,2</sup> </a>&emsp;
-    <a href='https://vinthony.github.io/' target='_blank'>Xiaodong Cun <sup>*,2</a>&emsp;
-    <a href='https://xuanwangvc.github.io/' target='_blank'>Xuan Wang <sup>3</sup></a>&emsp;
-    <a href='https://yzhang2016.github.io/' target='_blank'>Yong Zhang <sup>2</sup></a>&emsp;
-    <a href='https://xishen0220.github.io/' target='_blank'>Xi Shen <sup>2</sup></a>&emsp; </br>
-    <a href='https://yuguo-xjtu.github.io/' target='_blank'>Yu Guo<sup>1</sup> </a>&emsp;
-    <a href='https://scholar.google.com/citations?hl=zh-CN&user=4oXBp9UAAAAJ' target='_blank'>Ying Shan <sup>2</sup> </a>&emsp;
-    <a target='_blank'>Fei Wang <sup>1</sup> </a>&emsp;
-</div>
-<br>
-<div>
-    <sup>1</sup> Xi'an Jiaotong University &emsp; <sup>2</sup> Tencent AI Lab &emsp; <sup>3</sup> Ant Group &emsp; 
-</div>
-<br>
-<i><strong><a href='https://arxiv.org/abs/2211.12194' target='_blank'>CVPR 2023</a></strong></i>
-<br>
-<br>
+You don't need any programming experience to use GladTalker Studio. Here is what your computer needs:
 
+- **Windows, macOS, or Linux** — A dedicated graphics card (NVIDIA, AMD, or Apple Silicon) makes videos much faster, though a regular computer works too.
+- **About 5 GB of free disk space** — For the program and its voice and face files (downloaded once).
+- **Two free helper programs:**
+  - **Python** — runs the GladTalker engine behind the scenes.
+  - **FFmpeg** — combines the voices and animation into a finished video file.
 
-![sadtalker](https://user-images.githubusercontent.com/4397546/222490039-b1f6156b-bf00-405b-9fda-0c9a9156f991.gif)
+---
 
-<b>TL;DR: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; single portrait image 🙎‍♂️  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; audio 🎤  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; =  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; talking head video 🎞.</b>
+## Installing GladTalker Studio
 
-<br>
+Follow these steps once to set up GladTalker on your computer.
 
-</div>
+### Step 1: Download GladTalker
 
+1. On this GitHub page, click the green **Code** button near the top, then click **Download ZIP**.
+2. Find the downloaded `.zip` file on your computer and extract (unzip) it somewhere easy to remember—for example, `C:\GladTalker` on Windows or `~/GladTalker` on macOS/Linux.
 
+*(If you already have Git installed, you can run `git clone https://github.com/roscoe-sincero-sys/GladTalker.git` instead.)*
 
-## Highlights
+### Step 2: Install Python
 
-- The license has been updated to Apache 2.0, and we've removed the non-commercial restriction
-- **SadTalker has now officially been integrated into Discord, where you can use it for free by sending files. You can also generate high-quailty videos from text prompts. Join: [![Discord](https://dcbadge.vercel.app/api/server/rrayYqZ4tf?style=flat)](https://discord.gg/rrayYqZ4tf)**
+- **Windows (most computers):** Download **Python 3.12** from [python.org/downloads](https://www.python.org/downloads/).
+  > **Important:** On the first screen of the installer, check the box that says **"Add python.exe to PATH"** before clicking **Install Now**.
+  *(Using Python 3.12 works on all Windows computers, including ones with AMD graphics cards.)*
+- **macOS:** Download Python 3.12+ from [python.org/downloads](https://www.python.org/downloads/) or install it with Homebrew (`brew install python`).
+- **Linux:** Python 3 is usually already installed. Make sure the `python3-venv` package is installed as well (for example, `sudo apt install python3-venv`).
 
-- We've published a [stable-diffusion-webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) extension. Check out more details [here](docs/webui_extension.md). [Demo Video](https://user-images.githubusercontent.com/4397546/231495639-5d4bb925-ea64-4a36-a519-6389917dac29.mp4)
+### Step 3: Install FFmpeg
 
-- Full image mode is now available! [More details...](https://github.com/OpenTalker/SadTalker#full-bodyimage-generation)
+Open your computer's command window (**Terminal** or **PowerShell** on Windows; **Terminal** on macOS/Linux) and run the command for your system:
 
-| still+enhancer in v0.0.1                 | still + enhancer   in v0.0.2       |   [input image @bagbag1815](https://twitter.com/bagbag1815/status/1642754319094108161) |
-|:--------------------: |:--------------------: | :----: |
-| <video  src="https://user-images.githubusercontent.com/48216707/229484996-5d7be64f-2553-4c9e-a452-c5cf0b8ebafe.mp4" type="video/mp4"> </video> | <video  src="https://user-images.githubusercontent.com/4397546/230717873-355b7bf3-d3de-49f9-a439-9220e623fce7.mp4" type="video/mp4"> </video>  | <img src='./examples/source_image/full_body_2.png' width='380'> 
-
-- Several new modes (Still, reference, and resize modes) are now available!
-
-- We're happy to see more community demos on [bilibili](https://search.bilibili.com/all?keyword=sadtalker), [YouTube](https://www.youtube.com/results?search_query=sadtalker) and [X (#sadtalker)](https://twitter.com/search?q=%23sadtalker&src).
-
-## Changelog 
-
-See [CHANGELOG.md](CHANGELOG.md) for GladTalker release notes (current version: **`v0.1.0`**). Upstream pre-fork SadTalker history can be found [here](docs/changlelog.md).
-
-- __[2023.06.12]__: Added more new features in WebUI extension, see the discussion [here](https://github.com/OpenTalker/SadTalker/discussions/386).
-
-- __[2023.06.05]__: Released a new 512x512px (beta) face model. Fixed some bugs and improve the performance.
-
-- __[2023.04.15]__: Added a WebUI Colab notebook by [@camenduru](https://github.com/camenduru/): [![sd webui-colab](https://img.shields.io/badge/Automatic1111-Colab-green)](https://colab.research.google.com/github/camenduru/stable-diffusion-webui-colab/blob/main/video/stable/stable_diffusion_1_5_video_webui_colab.ipynb)
-
-- __[2023.04.12]__: Added a more detailed WebUI installation document and fixed a problem when reinstalling.
-
-- __[2023.04.12]__: Fixed the WebUI safe issues becasue of 3rd-party packages, and optimized the output path in `sd-webui-extension`.
-
-- __[2023.04.08]__: In v0.0.2, we added a logo watermark to the generated video to prevent abuse. _This watermark has since been removed in a later release._
-
-- __[2023.04.08]__: In v0.0.2, we added features for full image animation and a link to download checkpoints from Baidu. We also optimized the enhancer logic.
-
-## To-Do
-
-We're tracking new updates in [issue #280](https://github.com/OpenTalker/SadTalker/issues/280).
-
-## Troubleshooting
-
-If you have any problems, please read our [FAQs](docs/FAQ.md) before opening an issue.
-
-
-
-## 1. Installation.
-
-Community tutorials: [中文Windows教程 (Chinese Windows tutorial)](https://www.bilibili.com/video/BV1Dc411W7V6/) | [日本語コース (Japanese tutorial)](https://br-d.fanbox.cc/posts/5685086).
-
-### Linux/Unix
-
-1. Install [Python 3.10+](https://www.python.org/downloads/) (tested on Python 3.14), `git`, and `ffmpeg`.
-
-2. Create a virtual environment and install the requirements:
-  ```bash
-  git clone https://github.com/OpenTalker/SadTalker.git
-
-  cd SadTalker
-
-  python3 -m venv venv
-  source venv/bin/activate
-
-  # Install PyTorch (see https://pytorch.org/get-started/locally/ for CUDA/ROCm/CPU options)
-  pip install torch torchvision torchaudio
-
-  pip install -r requirements.txt
+- **Windows (PowerShell):**
+  ```powershell
+  winget install Gyan.FFmpeg
   ```
-### Windows
+- **macOS (Terminal, using [Homebrew](https://brew.sh/)):**
+  ```bash
+  brew install ffmpeg
+  ```
+- **Linux (Ubuntu / Debian):**
+  ```bash
+  sudo apt install ffmpeg
+  ```
 
-A video tutorial in chinese is available [here](https://www.bilibili.com/video/BV1Dc411W7V6/). You can also follow the following instructions:
+> **Tip:** After installing Python or FFmpeg, **close and reopen** your terminal window so your computer recognizes the new tools.
 
-1. Install [Python 3.10+](https://www.python.org/downloads/windows/) (tested on Python 3.14) and check "Add Python to PATH".
-2. Install [git](https://git-scm.com/download/win) manually or using [Scoop](https://scoop.sh/): `scoop install git`.
-3. Install `ffmpeg`, following [this tutorial](https://www.wikihow.com/Install-FFmpeg-on-Windows) or using [scoop](https://scoop.sh/): `scoop install ffmpeg`.
-4. Clone the repository and download the checkpoints and gfpgan models in the [downloads section](#2-download-models).
-5. Create a virtual environment and install dependencies (or double-click `webui.bat` to set up and launch the Gradio WebUI):
-   ```powershell
-   python -m venv venv
-   .\venv\Scripts\activate
-   # CPU-only PyTorch (or choose a CUDA build at https://pytorch.org/get-started/locally/)
-   # For AMD GPUs on Windows (DirectML / ROCm), see docs/install.md#windows-amd-gpu-directml--rocm
-   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-   pip install -r requirements.txt
+### Step 4: Set Up GladTalker's Files
+
+Next, you'll create a small private folder (called a *virtual environment*) inside your GladTalker folder so GladTalker's tools stay tidy and don't affect anything else on your computer.
+
+Open a terminal window, move into your GladTalker folder (for example, `cd C:\GladTalker`), and run **one** of the sets of commands below depending on your computer:
+
+#### Windows — Standard (NVIDIA graphics card or no separate graphics card)
+
+```powershell
+python -m venv venv
+.\venv\Scripts\activate
+pip install torch torchvision torchaudio
+pip install -r requirements.txt
+```
+
+*(If you have an NVIDIA graphics card and want faster video creation, visit [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/) to copy the CUDA version of the `pip install torch ...` line.)*
+
+#### Windows — AMD Graphics Card (Radeon)
+
+```powershell
+py -3.12 -m venv venv-dml
+.\venv-dml\Scripts\activate
+pip install torch-directml
+pip install -r requirements.txt
+```
+
+#### macOS and Linux
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install torch torchvision torchaudio
+pip install -r requirements.txt
+```
+
+This step downloads GladTalker's helper libraries and can take a few minutes. You only need to do it once.
+
+### Step 5: Download the Voice and Face Models
+
+You don't need to download any AI model files by hand. The first time you open GladTalker Studio, a **Setup** panel will appear at the top of the screen with a **Download models** button. Click it once to download the required files (about 2.5 GB) with a live progress bar.
+
+---
+
+## Running the Studio (Quick Start)
+
+### Option 1: Open in Your Web Browser (Easiest)
+
+1. Open a terminal window in your GladTalker folder.
+2. Turn on GladTalker's environment:
+   - **Windows (standard):** `.\venv\Scripts\activate`
+   - **Windows (AMD):** `.\venv-dml\Scripts\activate`
+   - **macOS / Linux:** `source venv/bin/activate`
+3. Start the Studio:
+   ```bash
+   python studio_server.py --open
    ```
 
-### macOS
+After a moment, GladTalker Studio will open automatically in your web browser at `http://127.0.0.1:7860`.
 
-A tutorial on installing SadTalker on macOS can be found [here](docs/install.md).
+> **Keep the terminal window open** while you are using GladTalker Studio—that window is running the engine in the background. When you're finished, simply close the browser tab and close the terminal window (or press `Ctrl+C` in it).
 
-### Docker, WSL, etc
+### Option 2: Use the Desktop App (Windows)
 
-Please check out additional tutorials [here](docs/install.md).
+GladTalker Studio is also available as a standalone desktop app that starts and stops the engine for you automatically—no terminal needed once it's installed. It also adds a normal **Save** window for projects, a **Show the video in its folder** button, a progress bar on the taskbar icon, and a desktop notification when a video finishes while you're working in another window.
 
-## 2. Download Models
+The first time you open the desktop app, if it doesn't spot your GladTalker folder right away, click **Choose GladTalker folder…** and point it to the folder from Step 1. To build the desktop app yourself, see [studio-ui/README.md](studio-ui/README.md#desktop-app).
 
-You can run the cross-platform Python downloader on Windows, macOS, or Linux:
+---
 
-```bash
-python scripts/download_models.py
-```
+## Making Your First Video (3 Simple Steps)
 
-Or on Linux/macOS with `wget`:
+Once GladTalker Studio is open, everything happens in three steps across the top of the screen:
 
-```bash
-bash scripts/download_models.sh
-```
+### 1. Cast — Choose Who Speaks
+- Upload a picture (a photo, a video-call screenshot, or a drawn/illustrated scene).
+- Click **Auto-Detect Cast** to find every face automatically, or click **+ Add region** to place a box around a character yourself.
+- Give each character a **Name**, pick a **Voice** (or fine-tune the pitch), and click **▶ Preview voice** to hear how they sound.
+- You can adjust any character's box by dragging it, using the **Arrow** keys (**Alt + Arrow** to resize), typing X/Y/W/H numbers, or clicking **Snap to face** / **Expand to tile**.
 
-We also provide an offline patch (`gfpgan/`), so no model will be downloaded when generating.
+### 2. Script — Write What They Say
+- Paste a whole conversation using `Name: line` format (for example, `Alex: Welcome to the meeting!`) and click **Import**, or add lines one by one.
+- If a word might be pronounced strangely by the voice, GladTalker shows a tip with a one-click **Auto-Fix** button.
+- Choose **Natural pace** or **Fit a target length**, then click **▶ Preview full audio mix** to hear the entire soundtrack and check the timing before making the video.
+- **Create closed captions** is turned on by default so your video includes `.srt` and `.vtt` caption files.
 
-### Pre-Trained Models
+### 3. Roll — Make Your Video
+- Check the **Ready to render?** list—if anything is missing, click its **Fix** button to jump straight to that field.
+- Choose your video shape (16:9 HD, Full HD, 9:16 Vertical for phones, 1:1 Square, or Match source) and quality:
+  - **Standard** — recommended for most videos (much faster).
+  - **Enhanced faces** — extra face sharpening (sharper, but roughly 3× slower).
+- Click **🎬 Render video**. Watch live progress by stage (or click **Cancel** anytime).
+- When it finishes, watch your captioned video right in the Studio, read the transcript, and download the MP4 and caption files.
 
-* [Google Drive](https://drive.google.com/file/d/1gwWh45pF7aelNP_P78uDJL8Sycep-K7j/view?usp=sharing)
-* [GitHub Releases](https://github.com/OpenTalker/SadTalker/releases)
-* [Baidu (百度云盘)](https://pan.baidu.com/s/1kb1BCPaLOWX1JJb9Czbn6w?pwd=sadt) (Password: `sadt`)
+> **Saving your work:** GladTalker Studio saves your progress automatically so you won't lose it if you reload or close the window. Use **Save project** and **Open…** in the top bar anytime you want to keep a copy of a project as a `.gladtalker.json` file.
 
-<!-- TODO add Hugging Face links -->
+---
 
-### GFPGAN Offline Patch
+## Built for Accessibility
 
-* [Google Drive](https://drive.google.com/file/d/19AIBsmfcHW6BRJmeqSFlG5fL445Xmsyi?usp=sharing)
-* [GitHub Releases](https://github.com/OpenTalker/SadTalker/releases)
-* [Baidu (百度云盘)](https://pan.baidu.com/s/1P4fRgk9gaSutZnn8YW034Q?pwd=sadt) (Password: `sadt`)
+GladTalker Studio is designed to be usable by everyone:
+- **Keyboard-friendly:** Every button, box, and script line works without a mouse or dragging.
+- **Screen-reader-friendly:** Clear labels, headings, landmarks, and live status announcements.
+- **Comfortable to read:** Follows your computer's light or dark theme, supports Windows High Contrast, respects reduced-motion settings, and reflows cleanly when zoomed in (up to 400%).
+- **Consistent Help:** Click **Help** in the top-right corner at any time for quick tips and keyboard shortcuts.
 
-<!-- TODO add Hugging Face links -->
+For details on our accessibility testing, see [docs/accessibility/wcag22-audit.md](docs/accessibility/wcag22-audit.md).
 
+---
 
-<details><summary>Model Details</summary>
+## Common Questions & Troubleshooting
 
+- **"FFmpeg not found" appears in Setup:**
+  Install FFmpeg (Step 3 above), close your terminal window completely, open a new one, and start GladTalker Studio again.
+- **The app takes a minute to start the first time:**
+  This is normal—the computer is loading the AI libraries for the first time. Later starts are faster.
+- **"No face was found" in a character's box:**
+  Click **Expand to tile** or make the box a bit bigger so the character's whole head and shoulders fit inside. For drawn or cartoon characters, set **Detection sensitivity** to **Sensitive** or **Very sensitive**.
+- **Making a video feels slow:**
+  Switch Quality from **Enhanced faces** to **Standard**. Each character is only animated while they are speaking, so shorter scripts finish much faster.
+- **Where are my finished videos saved?**
+  Inside your GladTalker folder, open `results` → `studio` → `renders`. Each video has its own dated folder with the `.mp4` video and `.srt` / `.vtt` caption files.
 
-Model explains:
+---
 
-##### New version 
-| Model | Description
-| :--- | :----------
-|checkpoints/mapping_00229-model.pth.tar | Pre-trained MappingNet in Sadtalker.
-|checkpoints/mapping_00109-model.pth.tar | Pre-trained MappingNet in Sadtalker.
-|checkpoints/SadTalker_V0.0.2_256.safetensors | packaged sadtalker checkpoints of old version, 256 face render).
-|checkpoints/SadTalker_V0.0.2_512.safetensors | packaged sadtalker checkpoints of old version, 512 face render).
-|gfpgan/weights | Face detection and enhanced models used in `facexlib` and `gfpgan`.
-  
-  
-##### Old version
-| Model | Description
-| :--- | :----------
-|checkpoints/auido2exp_00300-model.pth | Pre-trained ExpNet in Sadtalker.
-|checkpoints/auido2pose_00140-model.pth | Pre-trained PoseVAE in Sadtalker.
-|checkpoints/mapping_00229-model.pth.tar | Pre-trained MappingNet in Sadtalker.
-|checkpoints/mapping_00109-model.pth.tar | Pre-trained MappingNet in Sadtalker.
-|checkpoints/facevid2vid_00189-model.pth.tar | Pre-trained face-vid2vid model from [the reappearance of face-vid2vid](https://github.com/zhanglonghao1992/One-Shot_Free-View_Neural_Talking_Head_Synthesis).
-|checkpoints/epoch_20.pth | Pre-trained 3DMM extractor in [Deep3DFaceReconstruction](https://github.com/microsoft/Deep3DFaceReconstruction).
-|checkpoints/wav2lip.pth | Highly accurate lip-sync model in [Wav2lip](https://github.com/Rudrabha/Wav2Lip).
-|checkpoints/shape_predictor_68_face_landmarks.dat | Face landmark model used in [dilb](http://dlib.net/). 
-|checkpoints/BFM | 3DMM library file.  
-|checkpoints/hub | Face detection models used in [face alignment](https://github.com/1adrianb/face-alignment).
-|gfpgan/weights | Face detection and enhanced models used in `facexlib` and `gfpgan`.
+## For Developers & Advanced Users
 
-The final folder will be shown as:
+- **Studio UI & Desktop App source:** [studio-ui/README.md](studio-ui/README.md)
+- **Local Engine API reference:** [docs/studio_api.md](docs/studio_api.md)
+- **Extra installation notes (ROCm, WSL, Docker):** [docs/install.md](docs/install.md)
+- **Release notes:** [CHANGELOG.md](CHANGELOG.md)
 
-<img width="331" alt="image" src="https://user-images.githubusercontent.com/4397546/232511411-4ca75cbf-a434-48c5-9ae0-9009e8316484.png">
+## License & Credits
 
-
-</details>
-
-## 3. Quick Start
-
-Please read our document on [best practices and configuration tips](docs/best_practice.md)
-
-### WebUI Demos
-
-**Online Demo**: [HuggingFace](https://huggingface.co/spaces/vinthony/SadTalker) | [SDWebUI-Colab](https://colab.research.google.com/github/camenduru/stable-diffusion-webui-colab/blob/main/video/stable/stable_diffusion_1_5_video_webui_colab.ipynb) | [Colab](https://colab.research.google.com/github/Winfredy/SadTalker/blob/main/quick_demo.ipynb)
-
-**Local WebUI extension**: Please refer to [WebUI docs](docs/webui_extension.md).
-
-**Local gradio demo (recommanded)**: A Gradio instance similar to our [Hugging Face demo](https://huggingface.co/spaces/vinthony/SadTalker) can be run locally:
-
-```bash
-## Text-to-speech in the Gradio demo uses Idiap's maintained coqui-tts fork (installed via requirements.txt).
-python app_sadtalker.py
-```
-
-You can also start it more easily:
-
-- windows: just double click `webui.bat`, the requirements will be installed automatically.
-- Linux/Mac OS: run `bash webui.sh` to start the webui.
-
-### GladTalker Studio (preview)
-
-**GladTalker Studio** ([#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11)) turns a picture and a script into a multi-character talking scene in three steps, **Cast → Script → Roll**, with no terminal commands or Python editing. The interface is designed for WCAG 2.2 AA: it works fully by keyboard and with screen readers, never needs dragging, reflows at 320 px, and supports light/dark/High Contrast. The [WCAG 2.2 AA / WCAG2ICT audit](docs/accessibility/wcag22-audit.md) maps every criterion to the test that checks it, and lists the checks that still need a person.
-
-There are two ways to run it, both using your GladTalker folder and its Python environment:
-
-- **Desktop app (Windows, macOS, Linux):** install or build **GladTalker Studio** ([studio-ui/README.md](studio-ui/README.md#desktop-app)). It finds your GladTalker folder (or asks for it once), starts the engine in the background, and stops it when you close the app. It adds native Save dialogs, **Show in folder** for finished videos, a notification when a render finishes, and progress on the taskbar icon.
-- **Web mode:** run the engine and use your browser.
-
-  ```bash
-  python studio_server.py --open     # opens http://127.0.0.1:7860 (API docs at /docs)
-  ```
-
-The engine serves the UI and a FastAPI + WebSocket API for hardware detection, model downloads, face auto-casting, voice and full-mix previews, script import, and render jobs with live progress and `.srt`/`.vtt` captions. See [studio-ui/README.md](studio-ui/README.md) for the UI and [docs/studio_api.md](docs/studio_api.md) for the API.
-
-
-### CLI usage
-
-##### Animating a portrait image from default config:
-```bash
-python inference.py --driven_audio <audio.wav> \
-                    --source_image <video.mp4 or picture.png> \
-                    --enhancer gfpgan 
-```
-The results will be saved in `results/$SOME_TIMESTAMP/*.mp4`.
-
-##### Full body/image Generation:
-
-Using `--still` to generate a natural full body video. You can add `enhancer` to improve the quality of the generated video. 
-
-```bash
-python inference.py --driven_audio <audio.wav> \
-                    --source_image <video.mp4 or picture.png> \
-                    --result_dir <a file to store results> \
-                    --still \
-                    --preprocess full \
-                    --enhancer gfpgan 
-```
-
-More examples and configuration and tips can be founded in the [ >>> best practice documents <<<](docs/best_practice.md).
-
-## Citation
-
-If you find our work useful in your research, please consider citing:
-
-```bibtex
-@article{zhang2022sadtalker,
-  title={SadTalker: Learning Realistic 3D Motion Coefficients for Stylized Audio-Driven Single Image Talking Face Animation},
-  author={Zhang, Wenxuan and Cun, Xiaodong and Wang, Xuan and Zhang, Yong and Shen, Xi and Guo, Yu and Shan, Ying and Wang, Fei},
-  journal={arXiv preprint arXiv:2211.12194},
-  year={2022}
-}
-```
-
-## Acknowledgements
-
-Facerender code borrows heavily from [zhanglonghao's reproduction of face-vid2vid](https://github.com/zhanglonghao1992/One-Shot_Free-View_Neural_Talking_Head_Synthesis) and [PIRender](https://github.com/RenYurui/PIRender). We thank the authors for sharing their wonderful code. In training process, we also used the model from [Deep3DFaceReconstruction](https://github.com/microsoft/Deep3DFaceReconstruction) and [Wav2lip](https://github.com/Rudrabha/Wav2Lip). We thank for their wonderful work.
-
-We also use the following 3rd-party libraries:
-
-- **Face Utils**: https://github.com/xinntao/facexlib
-- **Face Enhancement**: https://github.com/TencentARC/GFPGAN
-- **Image/Video Enhancement**:https://github.com/xinntao/Real-ESRGAN
-
-## Extensions:
-
-- [SadTalker-Video-Lip-Sync](https://github.com/Zz-ww/SadTalker-Video-Lip-Sync) from [@Zz-ww](https://github.com/Zz-ww): SadTalker for Video Lip Editing
-
-## Related Works
-- [StyleHEAT: One-Shot High-Resolution Editable Talking Face Generation via Pre-trained StyleGAN (ECCV 2022)](https://github.com/FeiiYin/StyleHEAT)
-- [CodeTalker: Speech-Driven 3D Facial Animation with Discrete Motion Prior (CVPR 2023)](https://github.com/Doubiiu/CodeTalker)
-- [VideoReTalking: Audio-based Lip Synchronization for Talking Head Video Editing In the Wild (SIGGRAPH Asia 2022)](https://github.com/vinthony/video-retalking)
-- [DPE: Disentanglement of Pose and Expression for General Video Portrait Editing (CVPR 2023)](https://github.com/Carlyx/DPE)
-- [3D GAN Inversion with Facial Symmetry Prior (CVPR 2023)](https://github.com/FeiiYin/SPI/)
-- [T2M-GPT: Generating Human Motion from Textual Descriptions with Discrete Representations (CVPR 2023)](https://github.com/Mael-zys/T2M-GPT)
-
-## Disclaimer
-
-This is not an official product of Tencent. 
-
-```
-1. Please carefully read and comply with the open-source license applicable to this code before using it. 
-2. Please carefully read and comply with the intellectual property declaration applicable to this code before using it.
-3. This open-source code runs completely offline and does not collect any personal information or other data. If you use this code to provide services to end-users and collect related data, please take necessary compliance measures according to applicable laws and regulations (such as publishing privacy policies, adopting necessary data security strategies, etc.). If the collected data involves personal information, user consent must be obtained (if applicable). Any legal liabilities arising from this are unrelated to Tencent.
-4. Without Tencent's written permission, you are not authorized to use the names or logos legally owned by Tencent, such as "Tencent." Otherwise, you may be liable for legal responsibilities.
-5. This open-source code does not have the ability to directly provide services to end-users. If you need to use this code for further model training or demos, as part of your product to provide services to end-users, or for similar use, please comply with applicable laws and regulations for your product or service. Any legal liabilities arising from this are unrelated to Tencent.
-6. It is prohibited to use this open-source code for activities that harm the legitimate rights and interests of others (including but not limited to fraud, deception, infringement of others' portrait rights, reputation rights, etc.), or other behaviors that violate applicable laws and regulations or go against social ethics and good customs (including providing incorrect or false information, spreading pornographic, terrorist, and violent information, etc.). Otherwise, you may be liable for legal responsibilities.
-```
-
-LOGO: color and font suggestion: [ChatGPT](https://chat.openai.com), logo font: [Montserrat Alternates
-](https://fonts.google.com/specimen/Montserrat+Alternates?preview.text=SadTalker&preview.text_type=custom&query=mont).
-
-All the copyrights of the demo images and audio are from community users or the generation from stable diffusion. Feel free to contact us if you would like use to remove them.
-
-
-<!-- Spelling fixed on Tuesday, September 12, 2023 by @fakerybakery (https://github.com/fakerybakery). These changes are licensed under the Apache 2.0 license. -->
+GladTalker Studio is released under the [Apache License 2.0](LICENSE). It is built on [OpenTalker/SadTalker](https://github.com/OpenTalker/SadTalker), with voices powered by [Coqui TTS](https://github.com/idiap/coqui-tts) and optional face restoration by [GFPGAN](https://github.com/TencentARC/GFPGAN).
