@@ -9,10 +9,12 @@
 ## Running
 
 ```bash
-python studio_server.py                       # http://127.0.0.1:7860, docs at /docs
+python studio_server.py                       # UI at http://127.0.0.1:7860, API docs at /docs
 python studio_server.py --device dml:0        # auto | cpu | cuda[:N] | dml[:N] | mps
 python studio_server.py --port 0 --token XYZ  # sidecar mode: free port + bearer token
 ```
+
+When `studio-ui/dist/` is present (it is committed), the engine also serves the Studio UI at `/`, with a strict Content-Security-Policy. API routes always take precedence. See [`studio-ui/README.md`](../studio-ui/README.md).
 
 Once the server is accepting connections it prints one JSON line, for example `{"event": "listening", "host": "127.0.0.1", "port": 7860, ...}`. A parent process such as the Tauri shell can connect as soon as it reads that line. Renders and uploads go to `results/studio/` (change this with `--workspace`; paths with non-ASCII characters work).
 
@@ -25,7 +27,7 @@ The engine reads image paths, writes files, and starts downloads on your machine
 - **Network:** the server binds to **127.0.0.1** by default. It refuses to start on any other address unless `--token` is set, and then you must name the address clients will use with `--allow-host`.
 - **Host header:** unexpected `Host` headers are rejected (DNS-rebinding protection).
 - **Origin:** browser requests from any origin other than the Tauri shell (`tauri://localhost`, `http(s)://tauri.localhost`) or the same origin are rejected with `403` before anything runs. CORS alone isn't enough, because it only hides the response while the side effect would still happen. Use `--allow-origin` to add origins.
-- **Token:** with `--token` (or `GLADTALKER_STUDIO_TOKEN`), every route except `/health` needs `Authorization: Bearer <token>` or `X-GladTalker-Token: <token>`.
+- **Token:** with `--token` (or `GLADTALKER_STUDIO_TOKEN`), every route except `/health` needs `Authorization: Bearer <token>` or `X-GladTalker-Token: <token>`. The one exception is the bundled UI's own files (`/`, `/index.html`, and the files in `studio-ui/dist/`), which load with `GET`/`HEAD` and no token. A browser can't add a header to a page load, and the page has to load before it can read its `#token=` fragment. Those files are the same for every install and hold no user data. Uploads, job media, `/docs`, and every API route still need the token, and the Origin check still applies.
 - **WebSockets:** browsers can't send headers on WebSockets, and URLs end up in logs, so the token is never put in a WebSocket URL. Instead, get a single-use, 60-second ticket for one job from `POST /jobs/{id}/ws-ticket` and connect to the `url` it returns (`/ws/jobs/{id}?ticket=…`). Without a token, no ticket is needed. `token=` and `ticket=` values are redacted from server logs.
 - **Body size:** uploads are cut off at `max_upload_mb` (50 MB) as they stream in, and JSON bodies at 2 MB. Oversized requests get `413` without being spooled to disk.
 
@@ -39,14 +41,17 @@ The engine reads image paths, writes files, and starts downloads on your machine
 | `POST` | `/models/download` | Starts a download job, or returns the one already running. Missing, incomplete, and damaged files are fetched and checked against pinned sizes and SHA-256 digests before they replace anything. The pins were confirmed by a fresh download of all eight files from their upstream release URLs. Body: `{"force": false}`. |
 | `GET` | `/voices` | Voice presets: Neutral 0, Authoritative −1.5, Warm −0.5, Nervous +2.5 semitones (range −6…+6). |
 | `POST` | `/uploads` | Multipart `file` upload for `--web` mode. Returns `{image_path, width, height}`. |
+| `GET` | `/uploads/{name}` | Serves an uploaded image back (only files stored by `POST /uploads`, by their generated names), so the UI can show the scene after a reload. |
 | `POST` | `/cast/detect` | `{image_path, min_confidence=0.2, max_faces=8}` → faces in reading order with a suggested `region` each. Needs only the face-detection model (`detection_Resnet50_Final.pth`), which is verified first. If it's missing or damaged, the response is `422` asking the user to choose Download Models. |
 | `POST` | `/script/parse` | `{text, cast: [names]}` → dialogue lines, speakers, unknown speakers, lint warnings with an optional `fix`. Names from `cast` are recognised at any length, in any letter case, and with any spacing, and are returned exactly as the cast spells them. Without a cast, names of up to four words are detected. |
+| `POST` | `/script/lint` | `{lines: [text]}` → per-line pronunciation/quality warnings (the editor re-checks as you type). |
 | `POST` | `/tts/preview` | `{text, semitones=0, tempo=1}` → `audio/wav` (16 kHz mono). |
+| `POST` | `/audio/preview` | `{cast: [{name, semitones}], script, pacing}` → `202` job that builds the exact soundtrack a render would use. Its result has `tempo`, `duration_s`, `frames`, and caption timings; the WAV is at `/jobs/{id}/files/audio`. |
 | `POST` | `/render/start` | Render request (see below) → `202` job snapshot. |
 | `GET` | `/jobs`, `/jobs/{id}` | Job snapshots. |
 | `POST` | `/jobs/{id}/cancel` | Cancels a queued or running job. Running renders stop at the next frame batch, and intermediate files are removed. |
 | `POST` | `/jobs/{id}/ws-ticket` | Single-use WebSocket ticket for that job (needed when a token is set). |
-| `GET` | `/jobs/{id}/files/{video,srt,vtt}` | Downloads the finished outputs. |
+| `GET` | `/jobs/{id}/files/{video,srt,vtt,audio}` | Downloads the finished outputs (`audio` for audio previews). |
 | `WS` | `/ws/jobs/{id}` | Live job events. Past events are replayed first, and the socket closes after the final state. |
 
 Errors return `{"detail": "..."}` in plain language, for example *"Brain's region (X 900, …) extends outside the 977×580 image. Reduce W/H or move it so X+W ≤ 977 and Y+H ≤ 580."* Status codes: `422` for validation problems, `503` when FFmpeg or TTS is unavailable, `401` for a missing token, `403` for a foreign origin, `413` for an oversized body.
@@ -111,7 +116,12 @@ Every WebSocket message has this shape:
 - `progress` only increases.
 - `eta_s` is measured from the actual render speed so far.
 - Events are limited to about 4 per second, so a UI can forward `message` to an `aria-live="polite"` region without flooding screen readers.
-- Renders run one at a time on a single GPU lane. Model downloads use a separate lane, and only one download job can exist at a time.
+- Renders run one at a time on a single GPU lane. Model downloads and audio previews each have their own lane, so neither waits behind a render. Only one download job can exist at a time.
+- Audio previews are kept on disk only while they can still be fetched. Several engines can share one workspace, so each engine writes its previews into its own folder, `previews/engine-<id>/`, and holds an OS lock on it while it runs. Before each new preview, the engine:
+  - deletes its own previews whose job it no longer knows (dropped from its history), and keeps its 5 newest finished ones;
+  - deletes another engine's folder only with proof that Studio made it and its engine has exited. The name must be exactly `engine-<12 hex>`, its `.owner.lock` must exist and be over a minute old, and the lock must be free (the OS releases it even after a crash). Anything else under `previews/` is never touched.
+
+  Queued and running previews are never touched, and an engine deletes its own folder when it shuts down cleanly. Renders are never deleted.
 
 ## Walkthrough (Python)
 
@@ -151,4 +161,4 @@ Measured on an AMD Radeon RX 6550M (DirectML), a two-character, three-line scene
 - The first voice preview or render downloads the coqui-tts `tacotron2-DDC` voice (about 100 MB) into the coqui cache.
 - Model download progress is reported per file. An interrupted download restarts that file; it does not resume.
 - Verified on DirectML (AMD) and CPU. CUDA, ROCm, and MPS use the same code paths but haven't been exercised on real hardware yet.
-- Burned-in subtitles, project auto-save (`.gladtalker.json`), and the accessible UI itself are later phases of #11.
+- Burned-in subtitles and desktop packaging (Tauri, native dialogs and notifications) are later phases of #11. The Studio UI saves projects in the browser and as `.gladtalker.json` files.

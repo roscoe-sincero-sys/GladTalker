@@ -12,6 +12,47 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 ## [Unreleased]
 
 ### Added
+- **GladTalker Studio UI (phase 2 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio-ui/`, an accessible *Cast → Script → Roll* frontend (Svelte 5 + Vite) served by the engine at `/`. The built `dist/` is committed, so no Node is needed to use it. See [studio-ui/README.md](studio-ui/README.md).
+  - **Cast:** scene upload, Auto-Detect Cast, and color + shape + number speaker badges. Regions are edited by drag, by Arrow/Alt+Arrow keys, through X/Y/W/H steppers, or with Snap to face / Expand to tile. Names, voice presets, pitch, and voice preview.
+  - **Script:** paste-a-script import (adding unknown speakers to the cast), line editing with Play/Up/Down/Delete and Alt+↑/↓, live pronunciation lint with Auto-Fix, natural or target pacing, a full audio-mix preview with a pace meter and timeline, and a captions toggle.
+  - **Roll:**
+    - a checklist that jumps to the field to fix;
+    - framing presets with fit/fill and a described preview, quality, and file name;
+    - render progress by stage with ETA and Cancel;
+    - a captioned player with playback speed, transcript, and downloads.
+  - **Throughout:** autosave plus `.gladtalker.json` save/open, first-run setup (FFmpeg check, Download Models with progress), a Help dialog that stays in the same place, and live-region announcements.
+  - **WCAG 2.2 A/AA design:**
+    - native labelled controls, landmarks, and a skip link;
+    - drag alternatives everywhere, ≥ 36 px targets, and a focus ring never hidden by sticky bars;
+    - verified contrast in light and dark, forced-colors, reduced motion, and 320 px reflow.
+- Engine endpoints for the UI: `GET /uploads/{name}`, `POST /script/lint`, and `POST /audio/preview` (a job that builds the render's exact soundtrack; WAV via `/jobs/{id}/files/audio`). UI responses carry a strict Content-Security-Policy and `nosniff`.
+- UI robustness:
+  - Async results (import, upload, detection, render start) are dropped if New/Open replaced the project meanwhile.
+  - Renders and audio previews are started at project scope. A job the engine accepts after you've left the step is still saved, and the step follows it when shown again. Its button stays disabled while a request is on its way, and while a saved job's state is still being checked.
+  - Saved job references are trusted only if they look like engine job ids (12 hex characters), both when a project loads and in the API client, so an edited project file can't steer requests. The audio-preview staleness check saves only a digest, never an old copy of the dialogue.
+  - Lines over the 1000-character limit get no Auto-Fix (it would replace the whole line with a shortened one); they already ask to be split.
+  - A preview's timing and audio are shown together, and only for the newest preview.
+  - Auto-Fix suggestions belong to the exact text they were made for, and disappear as soon as the line changes.
+  - A finished video is shown even if its captions fail to load, and the captions have their own retry.
+  - Cancel's answer is only an acknowledgement; the job watcher alone sets the render's state, so a late answer can't bring back a render that has ended.
+  - Job watchers stop on 401/403/404, back off on network errors, and close when their step closes.
+  - `blob:` media URLs are released, and voice clips play one at a time.
+  - The engine's limits (8 cast members, 500 lines, 1000 characters a line) are checked in the UI, and the checklist and audio preview say where to fix them.
+  - Reordering keeps keyboard focus at the ends of the list.
+  - Downloads keep their file names in token mode.
+- Audio previews no longer pile up on disk. Each engine keeps its previews in its own locked folder: its previews whose job is gone are deleted, and its 5 newest finished ones are kept. Another engine's folder is reclaimed only with proof that Studio made it: an `engine-<id>` name, plus an existing ownership lock that is free because that engine has exited. Anything else under `previews/` is never deleted. So two engines can safely share one workspace, and two engines racing to reclaim the same folder both carry on.
+- UI tests:
+  - 66 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
+  - Playwright end-to-end tests against a real engine:
+    - axe WCAG 2.2 A/AA scans of every step in light and dark;
+    - keyboard region editing, and line reordering with focus kept at the ends of the list;
+    - a real audio-mix preview and autosave across reload;
+    - a slow import racing an Open project;
+    - stale Auto-Fix suggestions, a render accepted after leaving Roll, a slow re-attach to a saved render, a late Cancel acknowledgement, and a duplicate preview submission;
+    - forged job ids in an opened project (no job request is made), and no removed dialogue in a saved project file;
+    - the `#token=` launch against a token-protected engine, and a caption download failure in token mode;
+    - Help dialog focus and 320 px reflow;
+    - an opt-in real render.
 - **GladTalker Studio engine (phase 1 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio_server.py` + `src/studio/`, a local FastAPI + WebSocket backend for the upcoming *Cast → Script → Roll* UI ([docs/studio_api.md](docs/studio_api.md)):
   - `/hardware` (device, every CUDA/ROCm/DirectML/MPS GPU, FFmpeg, model readiness) and `/models` + `/models/download` (download job with per-file byte progress).
   - `/cast/detect`: RetinaFace auto-cast tuned for stylized faces (permissive threshold + 2× pass), reading-order badges, and region suggestions that snap to video-call tiles / comic panels.
@@ -31,7 +72,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached per file, bound to the hashed file's own size, mtime, and file ID (read from the open handle and re-checked against the path), with a racy-timestamp guard.
   - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (130 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (148 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.
@@ -47,6 +88,9 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 
 ### Fixed
 - DirectML device names no longer include a trailing NUL character in `describe_device()`.
+- The audio pipeline closes every WAV file it opens (pydub left them open, which on Windows could keep temporary work folders from being deleted).
+- Renders and audio previews without coqui-tts installed now fail with an install hint instead of "Something went wrong: No module named 'TTS'".
+- `POST /audio/preview` trims cast names and rejects blank ones, the same as `POST /render/start`.
 - Renders no longer fail when the image or workspace path contains non-ASCII characters on Windows (`preprocess.py` and `paste_pic.py` now use Unicode-safe image I/O).
 - Log redaction keeps uvicorn's access-log arguments intact. Previously, redacting a request line broke the access formatter.
 - The script importer recognises cast names longer than four words, and `**Name** (note):` lines. Previously such lines were silently merged into the previous speaker's line.

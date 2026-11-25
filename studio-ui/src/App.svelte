@@ -1,0 +1,132 @@
+<script>
+  import { onMount } from 'svelte';
+  import { STEPS, engine, nav, connectEngine, goTo, deviceLabel } from './lib/app-state.svelte.js';
+  import { project, saveProjectText, replaceProject, defaultProject } from './lib/project.svelte.js';
+  import { live, announce, announceError } from './lib/announce.svelte.js';
+  import { renderProblems, problemsForStep } from './lib/validate.js';
+  import Stepper from './components/Stepper.svelte';
+  import HelpDialog from './components/HelpDialog.svelte';
+  import SetupPanel from './components/SetupPanel.svelte';
+  import CastStep from './steps/CastStep.svelte';
+  import ScriptStep from './steps/ScriptStep.svelte';
+  import RollStep from './steps/RollStep.svelte';
+
+  let helpOpen = $state(false);
+  let openInput = $state();
+
+  onMount(connectEngine);
+
+  // Auto-save shortly after any change (WCAG 3.3.7: nothing is entered twice).
+  let saveTimer;
+  $effect(() => {
+    const snapshot = JSON.stringify(project);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveProjectText(snapshot), 300);
+    return () => clearTimeout(saveTimer);
+  });
+
+  const problems = $derived(renderProblems(project));
+  const complete = $derived({
+    cast: Boolean(project.image && project.cast.length && !problemsForStep(problems, 'cast').length),
+    script: Boolean(project.script.length && !problemsForStep(problems, 'script').length),
+  });
+  const needsSetup = $derived(engine.status === 'ready'
+    && (!engine.models?.complete || !engine.hardware?.ffmpeg?.available));
+  const index = $derived(STEPS.findIndex((s) => s.id === nav.step));
+
+  function saveFile() {
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    const base = (project.output.filename || project.cast.map((m) => m.name).join('-') || 'project')
+      .replace(/[^\w.-]+/g, '_').slice(0, 60);
+    a.href = URL.createObjectURL(blob);
+    a.download = `${base}.gladtalker.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    announce(`Project saved as ${a.download}.`);
+  }
+
+  async function openFile(file) {
+    if (!file) return;
+    try {
+      replaceProject(JSON.parse(await file.text()));
+      announce(`Opened ${file.name}: ${project.cast.length} cast members, ${project.script.length} lines.`);
+      goTo('cast');
+    } catch (err) {
+      announceError(err instanceof SyntaxError ? `${file.name} isn’t a valid project file.` : err.message);
+    } finally {
+      openInput.value = '';
+    }
+  }
+
+  function newProject() {
+    if (project.cast.length || project.script.length) {
+      if (!confirm('Start a new project? The current cast and script will be cleared. Save the project first if you want to keep it.')) return;
+    }
+    replaceProject(defaultProject());
+    announce('Started a new project.');
+    goTo('cast');
+  }
+</script>
+
+<a class="skip-link" href="#main">Skip to the current step</a>
+
+<div class="app">
+  <header class="app-header">
+    <div class="brand">
+      <h1>GladTalker Studio</h1>
+      {#if engine.version}<span class="version">v{engine.version}</span>{/if}
+    </div>
+    <Stepper {complete} />
+    <div class="row project" role="group" aria-label="Project">
+      <button type="button" onclick={newProject}>New</button>
+      <button type="button" onclick={() => openInput.click()}>Open…</button>
+      <input bind:this={openInput} type="file" accept=".json,application/json" class="visually-hidden"
+        tabindex="-1" aria-hidden="true" onchange={(e) => openFile(e.currentTarget.files?.[0])} />
+      <button type="button" onclick={saveFile}>Save project</button>
+    </div>
+    <button type="button" class="help-button" aria-haspopup="dialog" onclick={() => (helpOpen = true)}>
+      <span aria-hidden="true">?</span> Help
+    </button>
+  </header>
+
+  <main id="main" tabindex="-1">
+    {#if engine.status === 'offline'}
+      <section class="card offline" aria-labelledby="offline-heading">
+        <h2 id="offline-heading">Can’t reach the GladTalker engine</h2>
+        <p>{engine.error}</p>
+        <p>Start it with <code>python studio_server.py</code> (in the GladTalker folder), then try again.</p>
+        <button type="button" class="primary" onclick={connectEngine}>Try again</button>
+      </section>
+    {:else if engine.status === 'connecting'}
+      <p role="status">Connecting to the GladTalker engine…</p>
+    {:else}
+      {#if needsSetup}<SetupPanel />{/if}
+      {#if nav.step === 'cast'}<CastStep />{:else if nav.step === 'script'}<ScriptStep />{:else}<RollStep />{/if}
+    {/if}
+  </main>
+
+  <footer class="app-footer">
+    <p class="status">
+      <span>Computer: {deviceLabel()}</span>
+      {#if engine.models}<span> · Models: {engine.models.ready}/{engine.models.total} ready</span>{/if}
+    </p>
+    <button type="button" onclick={() => goTo(STEPS[index - 1].id)} disabled={index <= 0}>← Back</button>
+    {#if index < STEPS.length - 1}
+      <button type="button" class="primary" onclick={() => goTo(STEPS[index + 1].id)}>
+        Next: {STEPS[index + 1].label} →
+      </button>
+    {/if}
+  </footer>
+</div>
+
+<HelpDialog bind:open={helpOpen} version={engine.version} />
+
+<!-- Persistent live regions (WCAG 4.1.3): status and progress are announced without moving focus. -->
+<div class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">{live.polite}</div>
+<div class="visually-hidden" role="alert" aria-live="assertive" aria-atomic="true">{live.assertive}</div>
+
+<style>
+  .offline { border-left: 6px solid var(--error); }
+  .project { gap: 0.35rem; }
+</style>

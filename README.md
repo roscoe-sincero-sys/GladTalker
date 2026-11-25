@@ -224,15 +224,15 @@ You can also start it more easily:
 - windows: just double click `webui.bat`, the requirements will be installed automatically.
 - Linux/Mac OS: run `bash webui.sh` to start the webui.
 
-### GladTalker Studio engine (preview)
+### GladTalker Studio (preview)
 
-`studio_server.py` runs the local backend for **GladTalker Studio** ([#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11)), the upcoming *Cast → Script → Roll* interface for multi-character talking scenes. It exposes a FastAPI + WebSocket API for hardware detection, model downloads, face auto-casting, voice previews, script import, and render jobs with live progress and `.srt`/`.vtt` captions:
+**GladTalker Studio** ([#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11)) turns a picture and a script into a multi-character talking scene in three steps, **Cast → Script → Roll**, with no terminal commands or Python editing. The interface is designed for WCAG 2.2 AA: it works fully by keyboard and with screen readers, never needs dragging, reflows at 320 px, and supports light/dark/High Contrast.
 
 ```bash
-python studio_server.py            # http://127.0.0.1:7860 — interactive API docs at /docs
+python studio_server.py            # then open http://127.0.0.1:7860 (API docs at /docs)
 ```
 
-See [docs/studio_api.md](docs/studio_api.md) for endpoints and a walkthrough.
+The engine serves the UI and a FastAPI + WebSocket API for hardware detection, model downloads, face auto-casting, voice and full-mix previews, script import, and render jobs with live progress and `.srt`/`.vtt` captions. See [studio-ui/README.md](studio-ui/README.md) for the UI and [docs/studio_api.md](docs/studio_api.md) for the API.
 
 
 ### CLI usage
