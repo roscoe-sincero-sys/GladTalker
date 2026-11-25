@@ -6,9 +6,11 @@ import sys
 import unittest
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
+from scripts import download_models as dm
 from src.studio.faces import FaceDetectorService, retinaface_fallback
 from src.studio.jobs import UserFacingError
 from src.studio.pipeline import check_memory_budget, estimate_render_bytes
@@ -85,6 +87,51 @@ class _FakeNet:
     def detect_faces(self, image, conf_threshold):
         # A permissively patched detector could return low-score faces whatever was asked for.
         return [np.array([10, 10, 30, 30, 0.95]), np.array([40, 10, 60, 30, 0.70])]
+
+
+class DetectorModelGateTests(unittest.TestCase):
+    """Auto-cast must verify its RetinaFace weights before facexlib loads (or fetches) them."""
+
+    REL = "gfpgan/weights/detection_Resnet50_Final.pth"
+
+    def setUp(self):
+        import hashlib
+        import tempfile
+
+        self.root = Path(tempfile.mkdtemp(prefix="gladtalker_det_"))
+        self.data = b"retinaface" * 50
+        self.pin = mock.patch.dict(dm.MODEL_CHECKSUMS,
+                                   {self.REL: (len(self.data), hashlib.sha256(self.data).hexdigest())})
+        self.pin.start()
+        self.init = mock.patch("facexlib.detection.init_detection_model", return_value=_FakeNet())
+        self.init_mock = self.init.start()
+
+    def tearDown(self):
+        import shutil
+
+        self.init.stop()
+        self.pin.stop()
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _detect(self):
+        det = FaceDetectorService(model_root=str(self.root))
+        return det.detect(np.zeros((2000, 2000, 3), np.uint8), min_confidence=0.5)
+
+    def test_missing_weights_ask_for_download_without_loading(self):
+        with self.assertRaisesRegex(UserFacingError, "isn't downloaded yet.*Download Models"):
+            self._detect()
+        self.init_mock.assert_not_called()
+
+    def test_damaged_weights_ask_for_repair_without_loading(self):
+        (self.root / "detection_Resnet50_Final.pth").write_bytes(b"X" + self.data[1:])  # same size
+        with self.assertRaisesRegex(UserFacingError, "incomplete or damaged.*repair"):
+            self._detect()
+        self.init_mock.assert_not_called()
+
+    def test_verified_weights_load(self):
+        (self.root / "detection_Resnet50_Final.pth").write_bytes(self.data)
+        self.assertEqual(len(self._detect()), 2)
+        self.init_mock.assert_called_once()
 
 
 class AutoCastFloorTests(unittest.TestCase):

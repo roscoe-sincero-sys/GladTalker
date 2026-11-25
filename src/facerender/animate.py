@@ -244,11 +244,13 @@ class AnimateFromCoeff():
             # Stream frames through the enhancer into the writer one at a time. (imageio.mimsave
             # rejects generators, which used to force a fallback that held every enhanced frame,
             # at 2x resolution, in RAM; its bare except also swallowed real errors.)
+            frames = enhancer_generator_no_len(full_video_path, method=enhancer, bg_upsampler=background_enhancer)
             writer = imageio.get_writer(enhanced_path, fps=float(25))
             try:
-                for frame in enhancer_generator_no_len(full_video_path, method=enhancer, bg_upsampler=background_enhancer):
+                for frame in frames:
                     writer.append_data(frame)
             finally:
+                frames.close()  # releases the input decoder even if the writer failed
                 writer.close()
             
             save_video_with_watermark(enhanced_path, new_audio_path, av_path_enhancer, watermark= False)

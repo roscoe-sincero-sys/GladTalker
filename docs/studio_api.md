@@ -35,12 +35,12 @@ The engine reads image paths, writes files, and starts downloads on your machine
 | :--- | :--- | :--- |
 | `GET` | `/health` | Liveness and version (no token needed). |
 | `GET` | `/hardware` | Selected device (e.g. `DirectML:0 (AMD Radeon(TM) RX 6550M)`), every detected GPU, FFmpeg, model readiness, active jobs. |
-| `GET` | `/models` | Status of the 8 pretrained files. A file is `ready` only if its size **and SHA-256** match the pinned values. Truncated files show `incomplete: true`; same-size files with bad contents show `damaged: true`. Each file is hashed once (the result is cached against its size and modification time), so polling is cheap. |
+| `GET` | `/models` | Status of the 8 pretrained files. A file is `ready` only if its size **and SHA-256** match the pinned values. Truncated files show `incomplete: true`; same-size files with bad contents show `damaged: true`. Each file is hashed once, so polling is cheap. The cached result is bound to the exact file that was hashed (size, modification time, and file ID, read from the open file), so a replaced file is always re-checked. |
 | `POST` | `/models/download` | Starts a download job, or returns the one already running. Missing, incomplete, and damaged files are fetched and checked against pinned sizes and SHA-256 digests before they replace anything. The pins were confirmed by a fresh download of all eight files from their upstream release URLs. Body: `{"force": false}`. |
 | `GET` | `/voices` | Voice presets: Neutral 0, Authoritative −1.5, Warm −0.5, Nervous +2.5 semitones (range −6…+6). |
 | `POST` | `/uploads` | Multipart `file` upload for `--web` mode. Returns `{image_path, width, height}`. |
-| `POST` | `/cast/detect` | `{image_path, min_confidence=0.2, max_faces=8}` → faces in reading order with a suggested `region` each. |
-| `POST` | `/script/parse` | `{text, cast: [names]}` → dialogue lines, speakers, unknown speakers, lint warnings with an optional `fix`. Names from `cast` are recognised at any length and in any letter case. Without a cast, names of up to four words are detected. |
+| `POST` | `/cast/detect` | `{image_path, min_confidence=0.2, max_faces=8}` → faces in reading order with a suggested `region` each. Needs only the face-detection model (`detection_Resnet50_Final.pth`), which is verified first. If it's missing or damaged, the response is `422` asking the user to choose Download Models. |
+| `POST` | `/script/parse` | `{text, cast: [names]}` → dialogue lines, speakers, unknown speakers, lint warnings with an optional `fix`. Names from `cast` are recognised at any length, in any letter case, and with any spacing, and are returned exactly as the cast spells them. Without a cast, names of up to four words are detected. |
 | `POST` | `/tts/preview` | `{text, semitones=0, tempo=1}` → `audio/wav` (16 kHz mono). |
 | `POST` | `/render/start` | Render request (see below) → `202` job snapshot. |
 | `GET` | `/jobs`, `/jobs/{id}` | Job snapshots. |

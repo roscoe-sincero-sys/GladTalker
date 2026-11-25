@@ -15,6 +15,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Iterable, Optional
 
+from src.studio.schemas import name_key
 from src.utils.tts_text import TTS_CONTRACTIONS, normalize_tts_text
 
 MAX_RECOMMENDED_LINE_CHARS = 250
@@ -143,7 +144,10 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
       is used for all case variants.
     """
     cast_list = [c.strip() for c in cast if c and c.strip()]
-    canonical: dict[str, str] = {c.casefold(): c for c in cast_list}
+    # Normalized key -> the label exactly as the cast defines it (first one wins).
+    canonical: dict[str, str] = {}
+    for c in cast_list:
+        canonical.setdefault(name_key(c), c)
     known_re = _known_speaker_re(cast_list)
 
     lines: list[ParsedLine] = []
@@ -152,8 +156,10 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     current: Optional[ParsedLine] = None
 
     def canon(name: str) -> str:
+        # A cast member keeps their stored spelling (even "Officer  Mia" with two spaces); other
+        # names are tidied, and their first spelling is reused for later case/space variants.
         name = re.sub(r"\s+", " ", name.strip().strip("*_").strip())
-        return canonical.setdefault(name.casefold(), name)
+        return canonical.setdefault(name_key(name), name)
 
     for lineno, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
@@ -163,7 +169,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
 
         # Screenplay style: a line that is just a known cast name (optionally with a colon).
         bare = stripped.strip("*_ ").rstrip(":").strip("*_ ")
-        if cast_list and bare.casefold() in {c.casefold() for c in cast_list}:
+        if cast_list and name_key(bare) in {name_key(c) for c in cast_list}:
             pending_speaker, pending_note, current = canon(bare), None, None
             continue
 
@@ -195,7 +201,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
         lines.append(current)
 
     lines = [ln for ln in lines if ln.text]
-    known = {c.casefold() for c in cast_list}
+    known = {name_key(c) for c in cast_list}
     speakers: list[str] = []
     unknown: list[str] = []
     for i, ln in enumerate(lines):
@@ -213,7 +219,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             continue
         if ln.speaker not in speakers:
             speakers.append(ln.speaker)
-        if cast_list and ln.speaker.casefold() not in known:
+        if cast_list and name_key(ln.speaker) not in known:
             if ln.speaker not in unknown:
                 unknown.append(ln.speaker)
             ln.warnings.insert(

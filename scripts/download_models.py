@@ -129,14 +129,23 @@ def _load_cache(directory: Path) -> dict:
         return {}
 
 
-def _record_digest(dest: Path, digest: str) -> None:
-    """Remember ``dest``'s digest for its current size/mtime (best effort)."""
+class FileChangedError(OSError):
+    """The file at a path kept changing while it was being hashed."""
+
+
+def _identity(st: os.stat_result) -> tuple[int, int, int]:
+    return (st.st_size, st.st_mtime_ns, st.st_ino)
+
+
+def _record_digest(dest: Path, digest: str, snapshot: os.stat_result) -> None:
+    """Remember ``digest`` for the exact file described by ``snapshot`` (best effort). The entry
+    stores that file's size, mtime and file ID, so it can never describe a different file."""
     dest = Path(dest)
     try:
-        st = dest.stat()
         with _cache_lock:
             cache = _load_cache(dest.parent)
-            cache[dest.name] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha256": digest,
+            cache[dest.name] = {"size": snapshot.st_size, "mtime_ns": snapshot.st_mtime_ns,
+                                "ino": snapshot.st_ino, "sha256": digest,
                                 "verified_at_ns": time.time_ns()}
             fd, tmp = tempfile.mkstemp(prefix=VERIFY_CACHE_NAME + ".", dir=dest.parent)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -146,16 +155,42 @@ def _record_digest(dest: Path, digest: str) -> None:
         pass  # a read-only model folder just means we re-hash next time
 
 
+def _hash_open_file(f) -> str:
+    h = hashlib.sha256()
+    for chunk in iter(lambda: f.read(4 * 1024 * 1024), b""):
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def hash_snapshot(dest: Path, attempts: int = 3) -> tuple[str, os.stat_result]:
+    """Hash ``dest`` and return ``(digest, snapshot)`` where ``snapshot`` is the metadata of the
+    very file that was hashed: taken from the open handle before and after reading, and still
+    what the path points to afterwards. If the file is replaced or modified meanwhile, retry."""
+    dest = Path(dest)
+    for _ in range(attempts):
+        with open(dest, "rb") as f:
+            before = os.fstat(f.fileno())
+            digest = _hash_open_file(f)
+            after = os.fstat(f.fileno())
+        try:
+            current = os.stat(dest)
+        except FileNotFoundError:
+            current = None
+        if current is not None and _identity(before) == _identity(after) == _identity(current):
+            return digest, before
+    raise FileChangedError(f"{dest.name} kept changing while it was being verified; try again.")
+
+
 def file_digest(dest: Path, use_cache: bool = True) -> str:
     dest = Path(dest)
-    st = dest.stat()
     if use_cache:
+        st = dest.stat()
         entry = _load_cache(dest.parent).get(dest.name)
-        if (entry and entry.get("size") == st.st_size and entry.get("mtime_ns") == st.st_mtime_ns
+        if (entry and (entry.get("size"), entry.get("mtime_ns"), entry.get("ino")) == _identity(st)
                 and st.st_mtime_ns < entry.get("verified_at_ns", 0) - RACY_WINDOW_NS):
             return entry["sha256"]
-    digest = sha256_file(dest)
-    _record_digest(dest, digest)
+    digest, snapshot = hash_snapshot(dest)
+    _record_digest(dest, digest, snapshot)
     return digest
 
 
@@ -190,8 +225,6 @@ def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], at
     for attempt in range(attempts):
         try:
             os.replace(tmp_path, dest)
-            if expected is not None:
-                _record_digest(dest, expected[1])  # just verified; spare the next readiness check
             return
         except PermissionError:
             if expected is not None and _verified_quietly(dest, expected):

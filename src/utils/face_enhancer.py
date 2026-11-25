@@ -241,16 +241,24 @@ def enhancer_generator_no_len(images, method='gfpgan', bg_upsampler='realesrgan'
         )
 
     # ------------------------ restore ------------------------
-    for frame in tqdm(frames, 'Face Enhancer:', total=total):
-        img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    # This loop owns the frame source: close it on every exit (finished, error, cancellation, or
+    # the consumer closing us) so a streamed video's decoder is released before callers try to
+    # delete the file. Windows refuses to delete a file that is still open.
+    try:
+        for frame in tqdm(frames, 'Face Enhancer:', total=total):
+            img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # restore faces and background if necessary
-        cropped_faces, restored_faces, r_img = restorer.enhance(
-            img,
-            has_aligned=False,
-            only_center_face=False,
-            paste_back=True,
-        )
+            # restore faces and background if necessary
+            cropped_faces, restored_faces, r_img = restorer.enhance(
+                img,
+                has_aligned=False,
+                only_center_face=False,
+                paste_back=True,
+            )
 
-        r_img = cv2.cvtColor(r_img, cv2.COLOR_BGR2RGB)
-        yield r_img
+            r_img = cv2.cvtColor(r_img, cv2.COLOR_BGR2RGB)
+            yield r_img
+    finally:
+        close = getattr(frames, 'close', None)
+        if close is not None:
+            close()

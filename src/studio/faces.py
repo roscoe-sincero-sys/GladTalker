@@ -11,6 +11,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
@@ -21,6 +22,7 @@ from src.studio.schemas import Region
 UPSCALE_BELOW_PX = 1600  # also scan at 2x when the longest side is smaller than this
 TILE_LINE_MIN_FACE_MULT = 1.5  # a tile border must be at least this many face-sizes long
 TILE_MAX_FACE_MULT = 7.0  # a "tile" larger than this many face-sizes is probably the whole scene
+DETECTOR_WEIGHTS = "detection_Resnet50_Final.pth"  # what facexlib loads for retinaface_resnet50
 
 
 @dataclass
@@ -185,10 +187,33 @@ class FaceDetectorService:
         self._net = None
         self._lock = threading.Lock()
 
+    def check_model(self) -> None:
+        """Verify the RetinaFace weights against their pinned size and SHA-256 before facexlib
+        touches them: facexlib would silently use a damaged file, or download a missing one with
+        no checksum. Only this one file is required, so casting works before render models are
+        installed."""
+        from scripts.download_models import expected_for, is_verified
+
+        from src.studio.jobs import UserFacingError
+
+        path = Path(self.model_root) / DETECTOR_WEIGHTS
+        expected = expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}")
+        if not path.is_file():
+            raise UserFacingError(
+                f"The face-detection model ({DETECTOR_WEIGHTS}) isn't downloaded yet. "
+                "Choose Download Models, then try Auto-Cast again."
+            )
+        if not is_verified(path, expected):
+            raise UserFacingError(
+                f"The face-detection model ({DETECTOR_WEIGHTS}) is incomplete or damaged. "
+                "Choose Download Models to repair it, then try Auto-Cast again."
+            )
+
     def _get(self):
         if self._net is None:
             from facexlib.detection import init_detection_model
 
+            self.check_model()
             self._net = init_detection_model(
                 "retinaface_resnet50", half=False, device=self.device, model_rootpath=self.model_root
             )

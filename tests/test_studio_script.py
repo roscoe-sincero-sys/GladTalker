@@ -67,6 +67,39 @@ class ParseScriptTests(unittest.TestCase):
         r = parse_script("Al Bundy: Hi.\nAl: Hey.", cast=["Al", "Al Bundy"])
         self.assertEqual([l.speaker for l in r.lines], ["Al Bundy", "Al"])
 
+    def test_cast_label_spelling_is_preserved(self):
+        """A label with unusual internal spacing is still that cast member, spelled as stored,
+        and the imported lines render without manual correction."""
+        from src.studio.schemas import RenderRequest
+
+        cast = ["Officer  Mia", "Bob"]
+        parsed = parse_script("Officer Mia: Freeze.\nOFFICER   MIA: Hands up.\nOFFICER  MIA\nStay there.",
+                              cast=cast)
+        self.assertEqual([l.speaker for l in parsed.lines], ["Officer  Mia"] * 3)
+        self.assertEqual(parsed.unknown_speakers, [])
+        req = RenderRequest.model_validate({
+            "image_path": "scene.png",
+            "cast": [{"name": n, "region": {"x": 0, "y": 0, "w": 64, "h": 64}} for n in cast],
+            "script": [{"speaker": l.speaker, "text": l.text} for l in parsed.lines],
+        })
+        self.assertEqual({l.speaker for l in req.script}, {"Officer  Mia"})
+
+    def test_render_matches_speakers_ignoring_case_and_spacing(self):
+        from src.studio.schemas import RenderRequest
+
+        req = RenderRequest.model_validate({
+            "image_path": "scene.png",
+            "cast": [{"name": "Officer  Mia", "region": {"x": 0, "y": 0, "w": 64, "h": 64}}],
+            "script": [{"speaker": "officer mia", "text": "Hi."}],
+        })
+        self.assertEqual(req.script[0].speaker, "Officer  Mia")
+        with self.assertRaisesRegex(ValueError, "more than once"):
+            RenderRequest.model_validate({
+                "image_path": "scene.png",
+                "cast": [{"name": n, "region": {"x": 0, "y": 0, "w": 64, "h": 64}} for n in ("A  B", "a b")],
+                "script": [{"speaker": "A B", "text": "Hi."}],
+            })
+
     def test_parsed_script_is_accepted_by_render(self):
         """Contract: whatever /script/parse returns for a valid cast must validate in /render/start
         with each line attributed to the right cast member."""

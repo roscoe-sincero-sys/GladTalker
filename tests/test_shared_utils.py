@@ -190,6 +190,50 @@ class EnhancerStreamingTests(unittest.TestCase):
             self.assertEqual(sum(1 for _ in gen), 40)
 
 
+class EnhancerDecoderReleaseTests(unittest.TestCase):
+    """Cancelling enhancement must release the input video at once so cleanup can delete it
+    (Windows refuses to delete files that are still open)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix=UNICODE_PREFIX)
+        self.video = os.path.join(self.dir, "full.mp4")
+        _write_video(self.video, frames=10, size=(64, 64))
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_cancel_inside_progress_loop_releases_decoder(self):
+        from src.utils import face_enhancer
+
+        def cancelling_tqdm(iterable, *a, **kw):  # like Studio's hook raising JobCancelled
+            for i, item in enumerate(iterable):
+                if i == 1:
+                    raise KeyboardInterrupt("cancelled")
+                yield item
+
+        held_traceback = None
+        with mock.patch.object(face_enhancer, "SpandrelFaceRestorer", _FakeRestorer), \
+                mock.patch.object(face_enhancer, "tqdm", cancelling_tqdm):
+            try:
+                for _ in face_enhancer.enhancer_generator_no_len(self.video, bg_upsampler=None):
+                    pass
+            except KeyboardInterrupt as exc:
+                # Keep the traceback (and the generator frames it references) alive, as an
+                # error handler or log record further up would during cleanup.
+                held_traceback = exc.__traceback__
+        self.assertIsNotNone(held_traceback)
+        os.remove(self.video)  # would raise PermissionError on Windows if the capture were open
+
+    def test_consumer_closing_early_releases_decoder(self):
+        from src.utils import face_enhancer
+
+        with mock.patch.object(face_enhancer, "SpandrelFaceRestorer", _FakeRestorer):
+            frames = face_enhancer.enhancer_generator_no_len(self.video, bg_upsampler=None)
+            next(frames)
+            frames.close()  # what animate.py does in finally when the writer fails
+        os.remove(self.video)
+
+
 class PastePicCleanupTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix=UNICODE_PREFIX)

@@ -157,7 +157,7 @@ class ChecksumReadinessTests(unittest.TestCase):
     def test_digest_cache_hashes_once_and_invalidates_on_change(self):
         self.dest.write_bytes(self.data)
         self._age(60)  # an installed model, written long before it is checked
-        with mock.patch.object(dm, "sha256_file", wraps=dm.sha256_file) as hasher:
+        with mock.patch.object(dm, "_hash_open_file", wraps=dm._hash_open_file) as hasher:
             self.assertTrue(dm.is_verified(self.dest, self.expected))
             self.assertTrue(dm.is_verified(self.dest, self.expected))
             self.assertEqual(hasher.call_count, 1, "second check must come from the cache")
@@ -165,6 +165,73 @@ class ChecksumReadinessTests(unittest.TestCase):
             self._age(30)  # rewritten: different mtime invalidates the cache entry
             self.assertFalse(dm.is_verified(self.dest, self.expected))
             self.assertEqual(hasher.call_count, 2)
+
+    def _backup(self, data, age_s):
+        backup = self.dir / "backup.pth"
+        backup.write_bytes(data)
+        past = time.time_ns() - int(age_s * 1e9)
+        os.utime(backup, ns=(past, past))  # e.g. restored from an old backup: mtime preserved
+        return backup
+
+    def test_replacement_during_hash_never_caches_the_wrong_file(self):
+        """A valid backup replaces the damaged file while it is being hashed: the damaged file's
+        digest must not be recorded against the restored file."""
+        self.dest.write_bytes(self.damaged)
+        self._age(60)
+        backup = self._backup(self.data, 120)
+        backup_ino = os.stat(backup).st_ino
+        real_hash, real_stat = dm._hash_open_file, os.stat
+        calls, swapped = [], []
+
+        def counting_hash(f):
+            calls.append(real_hash(f))
+            return calls[-1]
+
+        def stat_with_swap(path, *a, **kw):
+            # The hashed file's handle is closed by the time the path is re-checked: that gap
+            # (after hashing, before the digest is cached) is where the restore lands.
+            if calls and not swapped and os.fspath(path) == os.fspath(self.dest):
+                os.replace(backup, self.dest)
+                swapped.append(True)
+            return real_stat(path, *a, **kw)
+
+        with mock.patch.object(dm, "_hash_open_file", counting_hash), \
+                mock.patch.object(dm.os, "stat", stat_with_swap):
+            self.assertTrue(dm.is_verified(self.dest, self.expected), "retries on the restored file")
+        self.assertEqual(swapped, [True])
+        self.assertEqual(calls, [hashlib.sha256(self.damaged).hexdigest(), self.expected[1]])
+        entry = dm._load_cache(self.dir)[self.dest.name]
+        self.assertEqual((entry["ino"], entry["sha256"]), (backup_ino, self.expected[1]))
+        with mock.patch.object(dm, "_hash_open_file", side_effect=AssertionError("re-hashed")):
+            self.assertTrue(dm.is_verified(self.dest, self.expected), "and the cached answer is right")
+
+    def test_cache_entry_for_another_file_id_is_ignored(self):
+        self.dest.write_bytes(self.damaged)
+        self._age(60)
+        self.assertFalse(dm.is_verified(self.dest, self.expected))  # cached: damaged
+        st = os.stat(self.dest)
+        backup = self._backup(self.data, 0)
+        os.utime(backup, ns=(st.st_atime_ns, st.st_mtime_ns))  # same size and mtime, other file
+        os.replace(backup, self.dest)
+        self.assertTrue(dm.is_verified(self.dest, self.expected))
+
+    def test_file_that_keeps_changing_is_not_verified(self):
+        self.dest.write_bytes(self.data)
+        real_hash = dm._hash_open_file
+        touches = []
+
+        def hash_then_touch(f):
+            digest = real_hash(f)
+            touches.append(1)
+            # Strictly increasing mtimes (the Windows clock can return the same time_ns twice).
+            stamp = 1_700_000_000_000_000_000 + len(touches) * 1_000_000_000
+            os.utime(self.dest, ns=(stamp, stamp))
+            return digest
+
+        with mock.patch.object(dm, "_hash_open_file", hash_then_touch):
+            with self.assertRaises(dm.FileChangedError):
+                dm.is_verified(self.dest, self.expected, use_cache=False)
+        self.assertNotIn(self.dest.name, dm._load_cache(self.dir))
 
     def test_racy_same_mtime_rewrite_is_still_detected(self):
         self.dest.write_bytes(self.data)

@@ -137,6 +137,16 @@ class StudioServerTests(unittest.TestCase):
         self.assertEqual(data["cast"][0]["face"]["y"], 60)  # reading order: top tile first
         self.assertEqual(data["cast"][0]["region_source"], "tile")
 
+    def test_cast_detect_reports_missing_detector_model(self):
+        from src.studio.faces import FaceDetectorService
+
+        self.services.detector = FaceDetectorService(model_root=str(self.tmp / "no_models"))
+        with mock.patch("facexlib.detection.init_detection_model") as init:
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("Download Models", r.json()["detail"])
+        init.assert_not_called()
+
     def test_cast_detect_bad_image(self):
         bad = self.tmp / "not_an_image.png"
         bad.write_bytes(b"nope")

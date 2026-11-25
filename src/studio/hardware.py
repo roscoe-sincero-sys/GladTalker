@@ -126,7 +126,10 @@ def models_status(root: Path = REPO_ROOT) -> dict:
         expected = expected_for(rel)
         exists = path.is_file()
         right_size = is_complete(path, expected)
-        ready = right_size and is_verified(path, expected)
+        try:
+            ready = right_size and is_verified(path, expected)
+        except OSError:  # busy or being replaced right now: not ready, check again later
+            ready = False
         files.append({
             "path": rel,
             "name": path.name,

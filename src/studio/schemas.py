@@ -13,6 +13,11 @@ MIN_SEMITONES, MAX_SEMITONES = -6.0, 6.0
 _SAFE_STEM_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
+def name_key(name: str) -> str:
+    """How speaker names are compared everywhere: case-insensitive, whitespace-insensitive."""
+    return " ".join(name.split()).casefold()
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -122,12 +127,12 @@ class RenderRequest(_Model):
     def _check_cast_and_script(self) -> "RenderRequest":
         seen: dict[str, str] = {}
         for member in self.cast:
-            key = member.name.casefold()
+            key = name_key(member.name)
             if key in seen:
                 raise ValueError(f"Cast member name '{member.name}' is used more than once.")
             seen[key] = member.name
         for i, line in enumerate(self.script, start=1):
-            canonical = seen.get(line.speaker.casefold())
+            canonical = seen.get(name_key(line.speaker))
             if canonical is None:
                 raise ValueError(
                     f"Line {i}: speaker '{line.speaker}' is not in the cast. "
