@@ -94,15 +94,17 @@
     captionError = '';
     if (!id) return;
     const mine = following(id);
-    let live = false; // saw it running here, so its ending is news worth announcing
+    // Its ending is news only if it was still running when this view attached (the watcher
+    // replays the history of a render that finished earlier, too).
+    const wasRunning = api.jobWasRunning(id);
     watch = api.watchJob(id, (j) => {
-      if (!mine()) return;
-      if (j.state === 'queued' || j.state === 'running') live = true;
-      job = j;
+      if (mine()) job = j;
     });
     watch.done.then(
-      (final) => {
+      async (final) => {
         if (!mine() || !final) return;
+        const live = await wasRunning;
+        if (!mine()) return;
         if (final.state === 'succeeded') loadVideo(final, live);
         else if (final.state === 'failed' && live) announceError(`Render failed: ${final.error || final.message}`);
         else if (final.state === 'cancelled' && live) announce('Render cancelled.');

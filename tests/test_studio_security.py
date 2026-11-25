@@ -198,8 +198,8 @@ class MemoryBudgetTests(unittest.TestCase):
 
 class LauncherTests(unittest.TestCase):
     def _launch(self, *args, env=None):
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8", **(env or {})}
-        env.pop("GLADTALKER_STUDIO_TOKEN", None)
+        inherited = {k: v for k, v in os.environ.items() if k != "GLADTALKER_STUDIO_TOKEN"}
+        env = {**inherited, "PYTHONIOENCODING": "utf-8", **(env or {})}  # a test's own token is kept
         return subprocess.Popen([sys.executable, str(REPO_ROOT / "studio_server.py"), *args],
                                 cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, env=env)
@@ -249,10 +249,8 @@ class LauncherTests(unittest.TestCase):
         gone.wait(timeout=30)
         self.assertTrue(wait_for_exit(gone.pid, poll_s=0.05))
 
-    def test_open_flag_opens_the_announced_address(self):
-        """--open opens the same origin as the ready line (and the docs), once the engine is
-        ready: not "localhost", which is another browser origin with its own saved project, and
-        may resolve to ::1, which isn't bound. A stand-in browser (BROWSER) records the URL."""
+    def _fake_browser(self):
+        """A stand-in browser (via BROWSER) that records the URL it is asked to open."""
         import tempfile
 
         tmp = Path(tempfile.mkdtemp(prefix="gladtalker_open_"))
@@ -264,8 +262,31 @@ class LauncherTests(unittest.TestCase):
                                 f"tmp = pathlib.Path({str(record) + '.tmp'!r})\n"
                                 "tmp.write_text(sys.argv[1])\n"
                                 f"os.replace(tmp, {str(record)!r})\n", encoding="utf-8")
-        env_browser = f'"{sys.executable}" "{fake_browser}" %s'
-        proc = self._launch("--port", "0", "--open", "--log-level", "warning", env={"BROWSER": env_browser})
+        return {"BROWSER": f'"{sys.executable}" "{fake_browser}" %s'}, record
+
+    def test_open_with_a_token_opens_nothing_and_says_how_to_open_it(self):
+        """A fresh browser tab has no token, so it would only show a disconnected page. The token
+        must not go into a URL handed to another program either, so --open explains instead."""
+        env, record = self._fake_browser()
+        proc = self._launch("--port", "0", "--open", "--log-level", "warning",
+                            env={**env, "GLADTALKER_STUDIO_TOKEN": "s3cret-token"})
+        try:
+            event = json.loads(proc.stdout.readline())
+            self.assertNotIn("s3cret-token", json.dumps(event))
+            time.sleep(2)  # time for a browser to have been started, if one were
+        finally:
+            proc.terminate()
+            _, err = proc.communicate(timeout=30)
+        self.assertFalse(record.exists(), "no browser is opened for a token-protected engine")
+        self.assertIn(f"Open {event['url']}/#token=<your token> yourself", err)
+        self.assertNotIn("s3cret-token", err)
+
+    def test_open_flag_opens_the_announced_address(self):
+        """--open opens the same origin as the ready line (and the docs), once the engine is
+        ready: not "localhost", which is another browser origin with its own saved project, and
+        may resolve to ::1, which isn't bound."""
+        env, record = self._fake_browser()
+        proc = self._launch("--port", "0", "--open", "--log-level", "warning", env=env)
         try:
             event = json.loads(proc.stdout.readline())
             deadline = time.time() + 30

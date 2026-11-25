@@ -273,14 +273,22 @@ test('coming back to a saved render blocks a second one until its state is known
   await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
   await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fa0000000003');
 
-  // Reload with a slow engine: the first status answer for that render is held back.
-  // (The fallback route stays registered first, so the one-shot hold below takes precedence.)
-  const release = await hold(page, '**/jobs/fa0000000003', (route) => route.fulfill({ json: renderSnapshot('fa0000000003', 'running') }));
+  // Reload with a slow engine: every status answer for that render is held back until release.
+  // (Added after the fallback route, so it is tried first: Playwright prefers newer routes.)
+  let release;
+  let reached;
+  const released = new Promise((r) => (release = r));
+  const arrived = new Promise((r) => (reached = r));
+  await page.route('**/jobs/fa0000000003', async (route) => {
+    reached();
+    await released;
+    await route.fulfill({ json: renderSnapshot('fa0000000003', 'running') });
+  });
   let starts = 0;
   page.on('request', (r) => { if (r.url().endsWith('/render/start')) starts++; });
   await page.reload();
   await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Roll/ }).click();
-  await release.reached; // the status request is now being held
+  await arrived; // a status request is now being held
   await expect(page.getByText('Checking on the last render…')).toBeVisible();
   await expect(page.getByRole('button', { name: /Render video/ })).toBeDisabled();
   release();

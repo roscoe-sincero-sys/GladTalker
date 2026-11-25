@@ -115,7 +115,14 @@ def main(argv=None) -> int:
             await super().startup(sockets=sockets)
             if self.started and not self.should_exit:
                 print(ready_line, flush=True)
-                if args.open:
+                if args.open and config.token:
+                    # A fresh browser tab wouldn't have the token, so it would only show an
+                    # offline page. The token is never put in a URL handed to another program
+                    # (process lists show command lines); the user opens it with the token.
+                    print(f"--open: this engine requires a token, so no browser was opened. Open "
+                          f"http://{shown}:{port}/#token=<your token> yourself (the part after # "
+                          f"stays in the browser).", file=sys.stderr, flush=True)
+                elif args.open:
                     # The announced address, not "localhost": that's a different browser origin
                     # (with its own saved project) and may resolve to ::1, which isn't bound.
                     open_in_browser(f"http://{shown}:{port}/")

@@ -32,15 +32,42 @@ const MAX_PROJECT_BYTES: usize = 50 * 1024 * 1024;
 /// serialized, so none of them acts on a stale engine).
 type AppState = Supervisor<engine::Running>;
 
+/// Where settings and logs go: the app's standard folders, or `GLADTALKER_STUDIO_DATA_DIR`
+/// (used by the desktop tests so they never touch a real user's settings).
+fn data_override() -> Option<PathBuf> {
+    std::env::var_os("GLADTALKER_STUDIO_DATA_DIR").filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
 fn config_file(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("engine.json"))
+    match data_override() {
+        Some(dir) => Some(dir.join("engine.json")),
+        None => app.path().app_config_dir().ok().map(|d| d.join("engine.json")),
+    }
 }
 
 fn log_file(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_log_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("GladTalker Studio"))
-        .join("engine.log")
+    match data_override() {
+        Some(dir) => dir.join("logs"),
+        None => app.path().app_log_dir().unwrap_or_else(|_| std::env::temp_dir().join("GladTalker Studio")),
+    }
+    .join("engine.log")
+}
+
+/// The engine's workspace: `<folder>/results/studio`, or `GLADTALKER_STUDIO_WORKSPACE`.
+fn workspace_for(folder: &std::path::Path) -> PathBuf {
+    std::env::var_os("GLADTALKER_STUDIO_WORKSPACE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| engine::workspace_of(folder))
+}
+
+/// Development builds load the UI from the dev server (`build.devUrl`), a different origin
+/// from the packaged app's, so the engine is told to accept it. Release builds never are.
+fn dev_origins(app: &AppHandle) -> Vec<String> {
+    if !cfg!(debug_assertions) {
+        return Vec::new();
+    }
+    app.config().build.dev_url.iter().map(|url| url.origin().ascii_serialization()).collect()
 }
 
 fn stop_engine(app: &AppHandle) {
@@ -56,7 +83,7 @@ fn ensure_started(app: &AppHandle, restart: bool, choose: Option<PathBuf>) -> St
         let python = std::env::var_os("GLADTALKER_PYTHON").map(PathBuf::from);
         let candidates = engine::candidate_folders(chosen, home, saved, std::env::current_exe().ok());
         let found = engine::locate(&candidates, python.as_deref())?;
-        engine::start(&found, &log_file(app))
+        engine::start(&found, &log_file(app), &workspace_for(&found.folder), &dev_origins(app))
     })
 }
 
@@ -132,7 +159,9 @@ async fn save_project(app: AppHandle, contents: String, suggested_name: String) 
         let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
             return Ok(None);
         };
-        std::fs::write(&path, contents).map_err(|e| format!("Couldn't save {}: {e}", path.display()))?;
+        // Whole or not at all: a failed save never leaves a truncated project behind.
+        engine::write_atomically(&path, contents.as_bytes())
+            .map_err(|e| format!("Couldn’t save {}: {e}. The previous file, if any, is unchanged.", path.display()))?;
         Ok(Some(path.display().to_string()))
     })
     .await?

@@ -51,9 +51,11 @@ Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that o
 - **Engine lifecycle:**
   - It starts the engine on a free port with a fresh random token.
   - The token goes in the engine's environment, never on its command line, which other programs can list.
+  - The engine always listens on `127.0.0.1`, whatever `GLADTALKER_STUDIO_HOST` says for web mode. The app checks the address the engine reports before using it.
+  - In development builds (`npm run tauri:dev`), the engine also accepts the dev server's origin (`build.devUrl`). Release builds never do.
   - It stops the engine and everything it started when you close the app (Windows: the whole process tree; elsewhere: the engine's process group). The engine also watches the app's process (`--exit-with-parent`), so it stops even if the app crashes.
   - Start, restart, and changing the folder happen one at a time, so a restart during a slow first start replaces the engine instead of returning the old one.
-- **Saving:** **Save project** opens a native Save dialog. **Open…** uses the system file picker.
+- **Saving:** **Save project** opens a native Save dialog. Saving is atomic: the file is written next to the old one and then replaces it, so a failed save never leaves a truncated project. **Open…** uses the system file picker.
 - **Finished videos:** **Show the video in its folder** opens the file manager. It only works for files the engine wrote, inside its workspace.
 - **While rendering:**
   - Render progress appears on the taskbar icon.
@@ -76,9 +78,12 @@ npm run tauri:build   # release build + installer (Windows: src-tauri/target/rel
 
 - `cd src-tauri && cargo test` runs the Rust unit tests: engine discovery, the ready line, tokens, and the workspace check.
 - `npm run e2e:desktop` (Windows, after `npm run tauri:build`) launches the built app with `GLADTALKER_HOME` set to this repository, attaches Playwright to its WebView2 over the DevTools protocol, and checks that:
+  - each run uses its own temporary profile, so it never touches your own autosaved project, settings, or renders: a WebView2 profile (`WEBVIEW2_USER_DATA_FOLDER`), settings and logs (`GLADTALKER_STUDIO_DATA_DIR`), and an engine workspace (`GLADTALKER_STUDIO_WORKSPACE`), plus a free DevTools port;
   - the engine starts;
   - there are no axe WCAG 2.2 A/AA violations;
   - an upload, face detection, and a real audio preview work;
+  - the engine listens on 127.0.0.1 even with `GLADTALKER_STUDIO_HOST=::1` set, and the token isn't on its command line;
+  - another profile's draft is untouched by a test run;
   - closing the app stops the engine;
   - killing the app stops the engine too.
 

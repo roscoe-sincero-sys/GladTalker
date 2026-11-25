@@ -2,10 +2,16 @@
 // attaches Playwright to its WebView2 over the Chrome DevTools Protocol, and drives the real
 // engine the app starts. Run with `npm run e2e:desktop` after `npm run tauri:build`
 // (see playwright.desktop.config.js).
+//
+// Every launch is fully isolated from the user's own GladTalker Studio: its own WebView2 profile
+// (so the autosaved project is a test one), its own settings and log folder, its own engine
+// workspace, and a free DevTools port. Running these tests never touches a real draft.
 import { test, expect, chromium } from '@playwright/test';
 import { spawn, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
@@ -14,7 +20,6 @@ const repo = path.resolve(import.meta.dirname, '../..');
 const PORTRAIT = path.join(repo, 'examples', 'source_image', 'people_0.png');
 const EXE = process.env.GLADTALKER_DESKTOP_EXE
   || path.join(repo, 'studio-ui', 'src-tauri', 'target', 'release', 'gladtalker-studio.exe');
-const CDP_PORT = Number(process.env.GLADTALKER_DESKTOP_CDP_PORT || 9333);
 
 test.skip(process.platform !== 'win32', 'the desktop end-to-end test drives WebView2 (Windows)');
 test.skip(!fs.existsSync(EXE), `build the app first (npm run tauri:build); no ${EXE}`);
@@ -48,41 +53,84 @@ async function disconnect(browser) {
   await Promise.race([browser.close().catch(() => {}), new Promise((r) => setTimeout(r, 5_000))]);
 }
 
-async function launchApp() {
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+/** A throwaway profile: WebView2 data (localStorage, so the autosaved project), the app's
+ * settings and logs, and the engine workspace, all under one temporary folder. */
+function newProfile(name = 'gladtalker-desktop-') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), name));
+  return { root, webview: path.join(root, 'webview2'), data: path.join(root, 'app-data'), workspace: path.join(root, 'workspace') };
+}
+
+async function launchApp(profile) {
+  const port = await freePort();
   const app = spawn(EXE, [], {
     env: { ...process.env, GLADTALKER_HOME: repo,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}` },
+      WEBVIEW2_USER_DATA_FOLDER: profile.webview,
+      GLADTALKER_STUDIO_DATA_DIR: profile.data,
+      GLADTALKER_STUDIO_WORKSPACE: profile.workspace,
+      // A web-mode bind address the desktop engine must not inherit (it always uses 127.0.0.1).
+      GLADTALKER_STUDIO_HOST: '::1',
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
     stdio: 'ignore',
   });
   const browser = await waitFor(async () => {
     try {
-      return await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+      return await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
     } catch {
       return null;
     }
   }, 60_000, 'the app’s WebView2 to accept a DevTools connection');
   const page = await waitFor(async () => browser.contexts()[0]?.pages().find((p) => !p.url().startsWith('devtools')), 30_000, 'the Studio page');
   page.setDefaultTimeout(60_000);
-  page.on('dialog', (dialog) => dialog.accept()); // "Start a new project?"
   return { app, browser, page };
 }
+
+/** Closes the window the normal way (WM_CLOSE) and waits for the app to exit. */
+async function closeApp({ app, browser }) {
+  // The app goes first: closing a DevTools connection to WebView2 can wait on its browser process.
+  try { execFileSync('taskkill', ['/PID', String(app.pid)], { stdio: 'ignore' }); } catch { /* already gone */ }
+  await waitFor(() => app.exitCode !== null, 30_000, 'the app to exit');
+  await disconnect(browser);
+}
+
+/** A new profile holds nothing, or the empty project the app autosaves on its first start. */
+const isEmptyProject = (p) => !p || (!p.image && p.cast.length === 0 && p.script.length === 0);
+
+const savedDraft = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('gladtalker.project.v1') || 'null'));
 
 test.describe.configure({ mode: 'serial' });
 
 test('the desktop app starts its engine, works end to end, and stops the engine when closed', async () => {
   test.setTimeout(6 * 60_000);
-  const { app, browser, page } = await launchApp();
+  const profile = newProfile();
+  const launched = await launchApp(profile);
+  const { app, page } = launched;
   try {
-    // The shell found GladTalker (GLADTALKER_HOME), started the engine, and handed over its port and token.
+    // The shell found GladTalker (GLADTALKER_HOME), started the engine on 127.0.0.1 even with
+    // GLADTALKER_STUDIO_HOST=::1 inherited, and handed over its port and token.
     await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible({ timeout: 180_000 });
     await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible();
-    // The app keeps its autosaved project between runs (like a browser profile): start fresh.
-    await page.getByRole('button', { name: 'New', exact: true }).click();
+    expect(isEmptyProject(await savedDraft(page))).toBe(true); // a brand-new profile: nobody's draft
     const engines = await waitFor(() => enginesOf(app.pid), 10_000, 'the engine process');
     expect(engines.length).toBeGreaterThan(0);
     // The token travels in the engine's environment, never on its command line (which any
     // program on the computer can list).
-    for (const line of engineCommandLines(app.pid)) expect(line).not.toMatch(/--token/);
+    for (const line of engineCommandLines(app.pid)) {
+      expect(line).not.toMatch(/--token/);
+      expect(line).toContain('--host 127.0.0.1');
+      expect(line).toContain(profile.workspace); // the test's own workspace
+    }
 
     // No WCAG 2.2 A/AA violations in the desktop window. (Evaluated over CDP, which the page's
     // Content-Security-Policy doesn't apply to; the policy itself stays on.)
@@ -109,22 +157,50 @@ test('the desktop app starts its engine, works end to end, and stops the engine 
     await page.getByRole('button', { name: 'Next: Roll' }).click();
     await expect(page.getByText(/Everything is ready: 1 cast member, 1 line/)).toBeVisible();
   } finally {
-    // Close the window the normal way (WM_CLOSE): the app stops its engine on exit. The app goes
-    // first: closing a DevTools connection to WebView2 can wait on the app's own browser process.
-    try { execFileSync('taskkill', ['/PID', String(app.pid)], { stdio: 'ignore' }); } catch { /* already gone */ }
-    await waitFor(() => app.exitCode !== null, 30_000, 'the app to exit');
-    await disconnect(browser);
+    await closeApp(launched); // the app stops its engine on exit
   }
   await waitFor(() => enginesOf(app.pid).length === 0, 30_000, 'the engine to stop after the app closed');
+  expect(fs.existsSync(path.join(profile.data, 'logs', 'engine.log'))).toBe(true); // logs went to the test's folder
+  fs.rmSync(profile.root, { recursive: true, force: true });
+});
+
+test('a test run never touches another profile’s autosaved draft', async () => {
+  test.setTimeout(6 * 60_000);
+  // A "user" profile with a draft in it.
+  const user = newProfile('gladtalker-user-');
+  let launched = await launchApp(user);
+  await expect(launched.page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
+  await launched.page.getByRole('button', { name: 'Next: Script' }).click();
+  await launched.page.getByRole('button', { name: '+ Add line' }).click();
+  await launched.page.getByLabel('What is said in line 1').fill('My unfinished draft.');
+  await expect.poll(async () => (await savedDraft(launched.page))?.script?.[0]?.text).toBe('My unfinished draft.');
+  await closeApp(launched);
+
+  // A test run in its own profile, starting a new project there.
+  const testRun = newProfile();
+  launched = await launchApp(testRun);
+  await expect(launched.page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
+  expect(isEmptyProject(await savedDraft(launched.page))).toBe(true);
+  await launched.page.getByRole('button', { name: 'New', exact: true }).click();
+  await closeApp(launched);
+
+  // The user's draft is exactly as it was.
+  launched = await launchApp(user);
+  await expect(launched.page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
+  expect((await savedDraft(launched.page)).script.map((l) => l.text)).toEqual(['My unfinished draft.']);
+  await closeApp(launched);
+  for (const p of [user, testRun]) fs.rmSync(p.root, { recursive: true, force: true });
 });
 
 test('if the app crashes, its engine still shuts itself down', async () => {
   test.setTimeout(4 * 60_000);
-  const { app, browser, page } = await launchApp();
+  const profile = newProfile();
+  const { app, browser, page } = await launchApp(profile);
   await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible({ timeout: 180_000 });
   const pid = app.pid;
   expect(enginesOf(pid).length).toBeGreaterThan(0);
   execFileSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore' }); // no chance to clean up
   await disconnect(browser);
   await waitFor(() => enginesOf(pid).length === 0, 60_000, 'the orphaned engine to notice and exit');
+  try { fs.rmSync(profile.root, { recursive: true, force: true }); } catch { /* WebView2 may still be letting go */ }
 });

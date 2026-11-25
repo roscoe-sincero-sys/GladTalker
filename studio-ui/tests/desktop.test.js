@@ -114,19 +114,22 @@ describe('starting the engine from the desktop app', () => {
 
 describe('render monitor (taskbar progress and notifications)', () => {
   let calls;
-  let realWatch;
+  let real;
   const call = vi.fn(async (cmd, args) => calls.push([cmd, args]));
 
   beforeEach(() => {
     calls = [];
-    realWatch = api.watchJob;
+    real = { watchJob: api.watchJob, jobWasRunning: api.jobWasRunning };
     replaceProject(defaultProject());
   });
   afterEach(() => {
-    api.watchJob = realWatch;
+    Object.assign(api, real);
   });
 
-  function scriptedJob(events) {
+  /** The engine's event stream for a job (a WebSocket replays all of it, history included),
+   * and whether the job was still running when the monitor attached. */
+  function scriptedJob(events, { runningAtAttach = true } = {}) {
+    api.jobWasRunning = async () => runningAtAttach;
     api.watchJob = (id, onEvent) => {
       for (const e of events.slice(0, -1)) onEvent(e);
       return { done: Promise.resolve(events.at(-1)), close() {} };
@@ -146,8 +149,20 @@ describe('render monitor (taskbar progress and notifications)', () => {
     stop();
   });
 
+  it('doesn’t notify about a render that had finished before it attached, despite the replayed history', async () => {
+    // The real replay of a finished job: queued and running come back before succeeded.
+    scriptedJob([{ state: 'queued', progress: 0 }, { state: 'running', progress: 0.5 },
+      { state: 'succeeded', result: { duration_s: 2, width: 1280, height: 720 } }], { runningAtAttach: false });
+    const stop = startRenderMonitor({ call });
+    project.lastRenderJobId = '0123456789ab';
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.filter(([c]) => c === 'notify')).toEqual([]);
+    expect(calls.filter(([c]) => c === 'set_progress').at(-1)[1].fraction).toBeNull(); // cleared
+    stop();
+  });
+
   it('doesn’t notify about a render that had already ended (say, after a restart), or a cancelled one', async () => {
-    scriptedJob([{ state: 'succeeded', result: {} }]);
+    scriptedJob([{ state: 'succeeded', result: {} }], { runningAtAttach: false });
     const stop = startRenderMonitor({ call });
     project.lastRenderJobId = '0123456789ab';
     await new Promise((r) => setTimeout(r, 20));

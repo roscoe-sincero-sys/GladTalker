@@ -24,17 +24,18 @@ export function startRenderMonitor({ call = desktopCall } = {}) {
     watch = null;
     progress(null);
     if (!id) return;
-    let live = false; // seen running here, so its end is news
+    // Its end is news only if it was still running when we started watching (the watcher
+    // replays the whole history of a job that finished before, queued and running included).
+    const wasRunning = api.jobWasRunning(id);
     watch = api.watchJob(id, (job) => {
       if (watchedId !== id || !RUNNING.has(job.state)) return;
-      live = true;
       progress(job.progress ?? 0);
     });
     watch.done.then(
-      (final) => {
+      async (final) => {
         if (watchedId !== id || !final) return;
         progress(null);
-        if (!live) return;
+        if (!(await wasRunning) || watchedId !== id) return;
         if (final.state === 'succeeded') {
           const r = final.result ?? {};
           notify('Your video is ready', `${duration(r.duration_s)}, ${r.width}×${r.height}. Open GladTalker Studio to watch it.`);

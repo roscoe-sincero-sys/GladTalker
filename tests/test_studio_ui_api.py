@@ -222,7 +222,11 @@ class PreviewRetentionTests(unittest.TestCase):
         young = self._store(stale_s=3600)
         young.new_folder("b", self.jobs)
         self.assertTrue(leftover.exists(), "a recent folder might belong to an engine still starting up")
-        self._store(stale_s=0).new_folder("c", self.jobs)
+        # Make its lock file clearly old: a file written microseconds ago can carry a timestamp a
+        # hair *after* time.time(), which with stale_s=0 reads as "not stale yet".
+        old = time.time() - 120
+        os.utime(dead.dir / ".owner.lock", (old, old))
+        self._store(stale_s=60).new_folder("c", self.jobs)
         self.assertFalse(dead.dir.exists())
 
     def test_two_engines_racing_to_reclaim_the_same_folder_both_carry_on(self):
@@ -232,6 +236,8 @@ class PreviewRetentionTests(unittest.TestCase):
         self._write(dead.new_folder("abc", self.jobs))
         dead._lock.release()
         dead._lock = None
+        old = time.time() - 120  # clearly stale (see test_a_dead_engines_folder_is_reclaimed_once_stale)
+        os.utime(dead.dir / ".owner.lock", (old, old))
         original = previews._FileLock.acquire
 
         def other_engine_wins(lock, *args, **kwargs):
@@ -240,7 +246,7 @@ class PreviewRetentionTests(unittest.TestCase):
                 shutil.rmtree(dead.dir)
             return original(lock, *args, **kwargs)
 
-        store = self._store(stale_s=0)
+        store = self._store(stale_s=60)
         with mock.patch.object(previews._FileLock, "acquire", other_engine_wins):
             folder = store.new_folder("j2", self.jobs)  # must not raise FileNotFoundError
         self.assertEqual(folder.parent, store.dir)

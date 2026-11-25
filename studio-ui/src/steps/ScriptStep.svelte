@@ -222,15 +222,15 @@
     if (!id) return;
     previewError = '';
     const mine = () => previewAttachedId === id && !destroyed;
-    let live = false;
+    const wasRunning = api.jobWasRunning(id); // its end is news only if it hadn't ended yet
     previewWatch = api.watchJob(id, (j) => {
-      if (!mine()) return;
-      if (j.state === 'queued' || j.state === 'running') live = true;
-      if (j.state !== 'succeeded') previewJob = j;
+      if (mine() && j.state !== 'succeeded') previewJob = j;
     });
     previewWatch.done.then(
       async (final) => {
         if (!mine() || !final) return;
+        const live = await wasRunning;
+        if (!mine()) return;
         if (final.state !== 'succeeded') {
           previewJob = final;
           if (final.state === 'failed' && live) announceError(final.error || 'The audio preview failed.');

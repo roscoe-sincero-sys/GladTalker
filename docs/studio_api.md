@@ -12,6 +12,7 @@
 python studio_server.py                       # UI at http://127.0.0.1:7860, API docs at /docs
 python studio_server.py --device dml:0        # auto | cpu | cuda[:N] | dml[:N] | mps
 python studio_server.py --open                # web mode: also open the UI in your browser
+                                              # (not with a token: it prints how to open it)
 python studio_server.py --port 0 --token XYZ --exit-with-parent PID
                                               # sidecar mode (the desktop app): free port,
                                               # bearer token, stops when process PID ends

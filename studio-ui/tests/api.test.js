@@ -72,6 +72,23 @@ describe('job ids', () => {
   });
 });
 
+describe('jobWasRunning', () => {
+  it('reports whether the job was still queued or running, and never throws', async () => {
+    const states = { '00000000000a': 'running', '00000000000b': 'queued', '00000000000c': 'succeeded' };
+    const fetchImpl = vi.fn(async (url) => {
+      const id = url.split('/').pop();
+      return states[id] ? json(200, { id, state: states[id] }) : json(404, { detail: 'gone' });
+    });
+    const api = createApi({ fetchImpl });
+    expect(await api.jobWasRunning('00000000000a')).toBe(true);
+    expect(await api.jobWasRunning('00000000000b')).toBe(true);
+    expect(await api.jobWasRunning('00000000000c')).toBe(false);
+    expect(await api.jobWasRunning('00000000000d')).toBe(false); // 404
+    expect(await api.jobWasRunning('../x')).toBe(false); // not even requested
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+});
+
 describe('engine token from the URL fragment', () => {
   it('moves #token into sessionStorage and removes it from the address bar', () => {
     const replaceState = vi.fn();

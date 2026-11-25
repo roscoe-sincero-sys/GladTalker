@@ -208,6 +208,17 @@ export function createApi({ base = '', fetchImpl = globalThis.fetch?.bind(global
     previewAudio: (body) => request('POST', '/audio/preview', body),
     startRender: (body) => request('POST', '/render/start', body),
     job: async (id) => request('GET', jobPath(id)),
+    /** Was the job still queued or running when we looked? Only then is its ending news worth
+     * announcing or notifying: a watcher also replays the history of a job that ended long ago.
+     * Never rejects (an unknown state counts as "not running"). */
+    jobWasRunning: async (id) => {
+      try {
+        const snapshot = await request('GET', jobPath(id));
+        return snapshot.state === 'queued' || snapshot.state === 'running';
+      } catch {
+        return false;
+      }
+    },
     cancelJob: async (id) => request('POST', jobPath(id, '/cancel')),
     fileUrl: async (id, kind) => mediaUrl(filePath(id, kind)),
     plainFileUrl: (id, kind) => `${base}${filePath(id, kind)}`,

@@ -134,13 +134,65 @@ pub fn is_inside(workspace: &Path, path: &Path) -> bool {
     }
 }
 
-/// Parses the engine's ready line: `{"event": "listening", "port": 54321, ...}`.
-pub fn parse_ready_line(line: &str) -> Option<u16> {
+/// The only address the desktop app's engine may listen on.
+pub const ENGINE_HOST: &str = "127.0.0.1";
+
+/// Parses the engine's ready line: `{"event": "listening", "host": "127.0.0.1", "port": 54321, ...}`.
+pub fn parse_ready_line(line: &str) -> Option<(String, u16)> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if value.get("event")?.as_str()? != "listening" {
         return None;
     }
-    u16::try_from(value.get("port")?.as_u64()?).ok()
+    let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;
+    Some((value.get("host")?.as_str()?.to_string(), port))
+}
+
+/// Writes a file so that it is either fully replaced or left as it was: the bytes go to a
+/// temporary file next to it, which then replaces the original (on Windows too). A failed or
+/// interrupted save never leaves a truncated project behind.
+pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_atomically_with(path, |file| file.write_all(contents))
+}
+
+pub fn write_atomically_with(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        write(&mut file)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path) // replaces an existing file, also on Windows
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// The engine's command line and environment. The token travels in the environment (process
+/// lists show command lines); the address is fixed to 127.0.0.1 whatever the user's web-mode
+/// settings are; `extra_origins` is the dev server's origin in development builds.
+pub fn engine_command(found: &Located, workspace: &Path, token: &str, extra_origins: &[String]) -> Command {
+    let mut cmd = Command::new(&found.python);
+    cmd.arg("studio_server.py")
+        .args(["--host", ENGINE_HOST, "--port", "0", "--log-level", "warning"])
+        .args(["--exit-with-parent", &std::process::id().to_string()])
+        .arg("--workspace")
+        .arg(workspace);
+    for origin in extra_origins {
+        cmd.args(["--allow-origin", origin]);
+    }
+    cmd.current_dir(&found.folder)
+        .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("GLADTALKER_STUDIO_TOKEN", token)
+        .env_remove("GLADTALKER_STUDIO_HOST")
+        .env_remove("GLADTALKER_STUDIO_PORT");
+    cmd
 }
 
 pub fn new_token() -> String {
@@ -195,20 +247,10 @@ impl Running {
 }
 
 /// Starts the engine and waits until it is accepting connections (or fails).
-pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
+pub fn start(found: &Located, log_path: &Path, workspace: &Path, extra_origins: &[String]) -> Result<Running, Status> {
     let token = new_token();
-    let workspace = workspace_of(&found.folder);
-    let mut cmd = Command::new(&found.python);
-    cmd.arg("studio_server.py")
-        .args(["--port", "0", "--log-level", "warning"])
-        .args(["--exit-with-parent", &std::process::id().to_string()])
-        .arg("--workspace")
-        .arg(&workspace)
-        .current_dir(&found.folder)
-        .env("PYTHONUNBUFFERED", "1")
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("GLADTALKER_STUDIO_TOKEN", &token) // not in argv: process lists show command lines
-        .stdin(Stdio::null())
+    let mut cmd = engine_command(found, workspace, &token, extra_origins);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
@@ -239,7 +281,7 @@ pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
         .map_err(|e| failed(format!("Couldn't start Python ({}): {e}", found.python.display()), log.text()))?;
 
     // Read both streams to the end on their own threads (a full pipe would stall the engine).
-    let (ready_tx, ready_rx) = mpsc::channel::<u16>();
+    let (ready_tx, ready_rx) = mpsc::channel::<(String, u16)>();
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
     let out_log = log.clone();
@@ -247,9 +289,9 @@ pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
         let mut announced = false;
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if !announced {
-                if let Some(port) = parse_ready_line(&line) {
+                if let Some(address) = parse_ready_line(&line) {
                     announced = true;
-                    let _ = ready_tx.send(port);
+                    let _ = ready_tx.send(address);
                     continue;
                 }
             }
@@ -266,9 +308,16 @@ pub fn start(found: &Located, log_path: &Path) -> Result<Running, Status> {
     let deadline = std::time::Instant::now() + START_TIMEOUT;
     loop {
         match ready_rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(port) => {
+            Ok((host, port)) => {
+                if host != ENGINE_HOST {
+                    stop(&mut child);
+                    return Err(failed(
+                        format!("The engine listened on {host} instead of {ENGINE_HOST}, so it was stopped."),
+                        log.text(),
+                    ));
+                }
                 let status = Status::Ready {
-                    base: format!("http://127.0.0.1:{port}"),
+                    base: format!("http://{ENGINE_HOST}:{port}"),
                     token,
                     folder: found.folder.display().to_string(),
                     python: found.python.display().to_string(),
@@ -411,10 +460,62 @@ mod tests {
 
     #[test]
     fn reads_only_the_listening_line() {
-        assert_eq!(parse_ready_line(r#"{"event": "listening", "host": "127.0.0.1", "port": 54321}"#), Some(54321));
-        assert_eq!(parse_ready_line(r#"{"event": "other", "port": 1}"#), None);
-        assert_eq!(parse_ready_line(r#"{"event": "listening", "port": 70000}"#), None);
+        assert_eq!(parse_ready_line(r#"{"event": "listening", "host": "127.0.0.1", "port": 54321}"#),
+            Some(("127.0.0.1".to_string(), 54321)));
+        assert_eq!(parse_ready_line(r#"{"event": "listening", "host": "::1", "port": 1}"#), Some(("::1".to_string(), 1)));
+        assert_eq!(parse_ready_line(r#"{"event": "other", "host": "127.0.0.1", "port": 1}"#), None);
+        assert_eq!(parse_ready_line(r#"{"event": "listening", "host": "127.0.0.1", "port": 70000}"#), None);
         assert_eq!(parse_ready_line("INFO: Started server"), None);
+    }
+
+    fn arg_list(cmd: &Command) -> Vec<String> {
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn the_engine_is_pinned_to_loopback_and_never_gets_the_token_on_its_command_line() {
+        let found = Located { folder: PathBuf::from("/gt"), python: PathBuf::from("/gt/venv/bin/python") };
+        let cmd = engine_command(&found, Path::new("/ws"), "secret-token", &[]);
+        let args = arg_list(&cmd);
+        let host_at = args.iter().position(|a| a == "--host").expect("--host");
+        assert_eq!(args[host_at + 1], ENGINE_HOST);
+        assert!(!args.iter().any(|a| a.contains("secret-token") || a == "--token"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--allow-origin"));
+        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        assert!(envs.contains(&("GLADTALKER_STUDIO_TOKEN".into(), Some("secret-token".into()))));
+        // A web-mode bind address set by the user (say ::1 or 0.0.0.0) is not inherited.
+        assert!(envs.contains(&("GLADTALKER_STUDIO_HOST".into(), None)));
+        assert!(envs.contains(&("GLADTALKER_STUDIO_PORT".into(), None)));
+    }
+
+    #[test]
+    fn development_builds_allow_the_dev_server_origin() {
+        let found = Located { folder: PathBuf::from("/gt"), python: PathBuf::from("/gt/venv/bin/python") };
+        let args = arg_list(&engine_command(&found, Path::new("/ws"), "t", &["http://localhost:5173".into()]));
+        let at = args.iter().position(|a| a == "--allow-origin").expect("--allow-origin");
+        assert_eq!(args[at + 1], "http://localhost:5173");
+    }
+
+    #[test]
+    fn saving_replaces_the_file_whole_or_not_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("scene.gladtalker.json");
+        fs::write(&path, b"original project").unwrap();
+
+        // A write that fails halfway leaves the original bytes, and no temporary file.
+        let err = write_atomically_with(&path, |f| {
+            f.write_all(b"half of the new")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(err.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original project");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1, "the temporary file was removed");
+
+        write_atomically(&path, b"new project").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new project");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+        write_atomically(&tmp.path().join("fresh.json"), b"{}").unwrap(); // a new file works too
+        assert_eq!(fs::read(tmp.path().join("fresh.json")).unwrap(), b"{}");
     }
 
     #[test]

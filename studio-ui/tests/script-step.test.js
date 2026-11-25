@@ -23,6 +23,7 @@ vi.mock('../src/lib/api.js', async (importOriginal) => {
         engine.linted.push(...lines);
         return { lines: lines.map((t) => (t ? [{ code: 'tts_contraction', message: 'Say “your”.', fix: `fixed: ${t}` }] : [])) };
       },
+      jobWasRunning: async () => false,
       watchJob: (id, onEvent) => {
         const job = finished(id, id === '00000000000a' ? 100 : 50);
         onEvent(job);
