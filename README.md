@@ -58,7 +58,7 @@
 
 ## Changelog 
 
-The previous changelog can be found [here](docs/changlelog.md).
+See [CHANGELOG.md](CHANGELOG.md) for GladTalker release notes (current version: **`v0.1.0`**). Upstream pre-fork SadTalker history can be found [here](docs/changlelog.md).
 
 - __[2023.06.12]__: Added more new features in WebUI extension, see the discussion [here](https://github.com/OpenTalker/SadTalker/discussions/386).
 
