@@ -22,6 +22,8 @@ The project saves itself in the browser as you work. **Save project** / **Open�
 
 ## Accessibility (WCAG 2.2 A & AA)
 
+The full audit maps every WCAG 2.2 A and AA criterion, read through WCAG2ICT for the desktop app, to its result and the test that checks it: [docs/accessibility/wcag22-audit.md](../docs/accessibility/wcag22-audit.md). It also lists the checks that still need a person, such as NVDA, Narrator, and real High Contrast themes.
+
 - **Structure:** native HTML controls with visible labels; `header` / `nav` / `main` / `footer` landmarks; a skip link. Errors are linked to their fields (`aria-describedby`, `aria-invalid`) and say how to fix the problem.
 - **Keyboard and pointer:**
   - Everything works from the keyboard.
@@ -87,7 +89,8 @@ npm run tauri:build   # release build + installer (Windows: src-tauri/target/rel
   - the engine listens on 127.0.0.1 even with `GLADTALKER_STUDIO_HOST=::1` set, and the token isn't on its command line;
   - another profile's draft is untouched by a test run;
   - closing the app stops the engine;
-  - killing the app stops the engine too.
+  - killing the app stops the engine too;
+  - Windows UI Automation (what Narrator, NVDA, and JAWS read) exposes named controls, the step headings, the landmarks, and the skip link (`e2e-desktop/uia-tree.ps1`).
 
   Set `GLADTALKER_DESKTOP_EXE` to test another build.
 
@@ -103,7 +106,16 @@ npm run e2e      # Playwright: starts an engine and drives the built dist/ in Ch
 ```
 
 - **Setup:** `npm run e2e` needs a one-time `npx playwright install chromium`. It uses `../venv` by default; set `GLADTALKER_PYTHON=../venv-dml/Scripts/python.exe` for the DirectML venv.
-- **What it covers:**
+- **The WCAG audit** (`e2e/wcag-audit.spec.js`, 109 tests): every screen state (each step, Help, first-run setup, engine offline), checked at 1280 × 880, at 200 % zoom (640 × 440), and at 400 % zoom (320 × 256), as applicable. It covers:
+  - axe in light, dark, and forced colours;
+  - Tab reaching every control in document order, with no trap, a visible focus ring with 3:1 contrast, and focus never hidden by the sticky header or footer;
+  - 24 px targets, reflow, text spacing, and 3:1 boundaries for form fields;
+  - no motion with reduced motion, no single-key shortcuts, and Help in the same place on every screen;
+  - errors tied to their fields, confirmation before work is replaced, and autosave that keeps an edit made just before closing;
+  - status messages, and the whole workflow done with the keyboard alone.
+
+  It runs in parallel: `npx playwright test e2e/wcag-audit.spec.js --workers=4` takes about 2 minutes.
+- **What else it covers:**
   - axe-core WCAG 2.2 A/AA scans of every step (light and dark);
   - keyboard editing, including focus after reordering at the top and bottom of the list;
   - the real audio preview and autosave;

@@ -273,7 +273,7 @@
     <h3 id="render-heading">Render</h3>
     <button type="button" class="primary big" onclick={render} disabled={problems.length > 0 || running || checking || submitting.render}
       aria-describedby={problems.length ? 'render-blocked' : undefined}>🎬 {submitting.render ? 'Starting the render…' : 'Render video'}</button>
-    {#if problems.length}<p class="muted" id="render-blocked">Fix the items above to enable rendering.</p>{/if}
+    {#if problems.length}<p class="muted" id="render-blocked">Fix the items under “Ready to render?” to enable rendering.</p>{/if}
     {#if checking}<p class="muted" role="status">Checking on the last render…</p>{/if}
     {#if startError}<p class="error-text">{startError}</p>{/if}
     <JobProgress job={shownJob} id="render-job" label="Render progress" oncancel={running ? cancel : null}

@@ -138,6 +138,9 @@ fieldset { border: 1px solid var(--border); border-radius: var(--radius); paddin
 legend { font-weight: 700; padding: 0 0.35rem; }
 
 .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+/* A field in a row may shrink to the row's width (its select then narrows too), so long options
+   with wider text spacing never push the page sideways (WCAG 1.4.10, 1.4.12). */
+.row > .field { min-width: 0; max-width: 100%; }
 .stack > * + * { margin-top: var(--gap); }
 
 .card {

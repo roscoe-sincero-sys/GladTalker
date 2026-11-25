@@ -221,3 +221,50 @@ test('if the app crashes, its engine still shuts itself down', async () => {
   await waitFor(() => enginesOf(pid).length === 0, 60_000, 'the orphaned engine to notice and exit');
   try { fs.rmSync(profile.root, { recursive: true, force: true }); } catch { /* WebView2 may still be letting go */ }
 });
+
+/** What Windows UI Automation (Narrator, NVDA, JAWS) exposes for the app's window. */
+function uiaTree(appPid) {
+  const out = execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    path.join(import.meta.dirname, 'uia-tree.ps1'), '-AppPid', String(appPid)], { encoding: 'utf-8' });
+  const parsed = JSON.parse(out.trim() || '[]');
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+test('screen readers get named controls, headings, and landmarks through UI Automation (WCAG2ICT 4.1.2, 1.3.1, 2.4.2)', async () => {
+  test.setTimeout(6 * 60_000);
+  const profile = newProfile();
+  const launched = await launchApp(profile);
+  const { app, page } = launched;
+  try {
+    await expect(page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
+    await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
+    await page.getByRole('button', { name: /Auto-Detect Cast/ }).click();
+    await expect(page.getByRole('group', { name: /Cast member 1/ })).toBeVisible({ timeout: 60_000 });
+
+    // Chromium builds its UI Automation tree when a client first asks: wait until it is complete.
+    let tree = [];
+    const has = (localized, name) => tree.some((e) => e.localized === localized && (name instanceof RegExp ? name.test(e.name) : e.name === name));
+    await waitFor(() => {
+      tree = uiaTree(app.pid);
+      return has('heading', 'Step 1 of 3: Cast') && has('button', /Auto-Detect Cast/);
+    }, 60_000, 'the UI Automation tree');
+
+    // The window's document is named after the app (2.4.2); the skip link, the step heading,
+    // and the landmarks are there (2.4.1, 1.3.1).
+    expect(has('document', 'GladTalker Studio')).toBe(true);
+    expect(has('link', 'Skip to the current step')).toBe(true);
+    expect(has('navigation', 'Steps')).toBe(true);
+    expect(tree.some((e) => e.localized === 'main')).toBe(true);
+    // The step buttons' names include their state once a step is done ("Cast, done").
+    for (const name of [/^Cast/, /^Script/, /^Roll/, /^Help$/, /^Next: Script/]) expect(has('button', name), String(name)).toBe(true);
+    // Cast member fields keep their visible labels as names (2.5.3, 3.3.2).
+    expect(tree.some((e) => e.type === 'Edit' && e.name === 'Name')).toBe(true);
+    // Every control a keyboard user can reach has a name (4.1.2).
+    const CONTROLS = new Set(['Button', 'Edit', 'ComboBox', 'CheckBox', 'RadioButton', 'Hyperlink', 'Spinner', 'Slider', 'List', 'ListItem']);
+    const unnamed = tree.filter((e) => e.focusable && e.enabled && CONTROLS.has(e.type) && !String(e.name || '').trim());
+    expect(unnamed, 'focusable controls without a name').toEqual([]);
+  } finally {
+    await closeApp(launched);
+  }
+  fs.rmSync(profile.root, { recursive: true, force: true });
+});

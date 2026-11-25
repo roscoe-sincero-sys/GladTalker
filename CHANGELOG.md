@@ -12,6 +12,10 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 ## [Unreleased]
 
 ### Added
+- **WCAG 2.2 AA and WCAG2ICT audit of GladTalker Studio (phase 4 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: [docs/accessibility/wcag22-audit.md](docs/accessibility/wcag22-audit.md). It covers all 55 Level A and AA criteria, each read through WCAG2ICT for the desktop app, with its result and evidence, plus a list of the checks that still need a person (NVDA, Narrator, real High Contrast themes, Windows text size).
+  - `studio-ui/e2e/wcag-audit.spec.js` (109 tests) checks every screen state at the window's size, at 200 % and at 400 % zoom. It covers axe in light, dark, and forced colours; keyboard reach, order, and traps; focus visible, focus contrast, and focus not obscured; target size, reflow, text spacing, and non-text contrast; reduced motion, character-key shortcuts, consistent help, error identification, error prevention, redundant entry, status messages, and the whole workflow by keyboard alone.
+  - The desktop end-to-end tests now read the app's **Windows UI Automation** tree (what Narrator, NVDA, and JAWS use) and check names, roles, headings, and landmarks.
+  - Shared Playwright helpers moved to `studio-ui/e2e/helpers.js`.
 - **GladTalker Studio desktop app (phase 3 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio-ui/src-tauri/`, a Tauri v2 shell around the Studio UI. On Windows it builds a 1.3 MB NSIS installer. See [studio-ui/README.md](studio-ui/README.md#desktop-app).
   - **Engine:** the app finds the GladTalker folder and its venv (a folder just chosen with a native dialog, `GLADTALKER_HOME`, the folder chosen in an earlier session, or the folders around the app). It starts `studio_server.py` on a free port with a fresh 256-bit token, passed in the environment rather than on the command line. It stops the engine's whole process tree on exit. A relative `GLADTALKER_STUDIO_WORKSPACE` is resolved once, against the app's working directory, for both the engine and the app's own checks; a workspace that still isn't a full path (a drive-relative `C:workspace`) is refused with an explanation. A relative `GLADTALKER_HOME` or `GLADTALKER_PYTHON` is made absolute the same way. A checkout older than this app (its `studio_server.py` lacks `--exit-with-parent`) is detected before launch, and the setup screen says how to update it. The engine is always bound to 127.0.0.1, and its ready line must confirm that. Start, restart, and folder changes are serialized. Debug builds also allow the dev server's origin, so `npm run tauri:dev` works. If something goes wrong, a setup screen says what's missing, shows the engine's last messages, and offers **Choose GladTalker folder…** and **Try again**.
   - **Native features:**
@@ -101,6 +105,11 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 - `requirements.txt`: added `fastapi`, `uvicorn`, `python-multipart`, and `websockets` for the Studio engine.
 
 ### Fixed
+- **Studio accessibility fixes from the phase 4 audit:**
+  - An edit made just before closing or reloading the window is no longer lost. The autosave also runs when the page is hidden or closed, not only 300 ms after the last change (3.3.7).
+  - At 320 px with WCAG text spacing, the **Detection sensitivity** field no longer pushes the page sideways (1.4.10, 1.4.12).
+  - **Open…** now asks before replacing unsaved work, as **New** does (3.3.4).
+  - The Roll step's hint names its section instead of saying "above" (1.3.3).
 - DirectML device names no longer include a trailing NUL character in `describe_device()`.
 - The audio pipeline closes every WAV file it opens (pydub left them open, which on Windows could keep temporary work folders from being deleted).
 - Renders and audio previews without coqui-tts installed now fail with an install hint instead of "Something went wrong: No module named 'TTS'".

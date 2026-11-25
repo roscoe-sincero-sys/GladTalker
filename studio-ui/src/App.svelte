@@ -29,13 +29,30 @@
     if (onDesktop && engine.status === 'ready' && !stopMonitor) stopMonitor = startRenderMonitor();
   });
 
-  // Auto-save shortly after any change (WCAG 3.3.7: nothing is entered twice).
+  // Auto-save shortly after any change (WCAG 3.3.7: nothing is entered twice), and at once when
+  // the page is hidden or closed, so an edit made just before closing the window isn't lost.
   let saveTimer;
-  $effect(() => {
-    const snapshot = JSON.stringify(project);
+  let unsaved = null;
+  function flushSave() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => saveProjectText(snapshot), 300);
+    if (unsaved !== null) saveProjectText(unsaved);
+    unsaved = null;
+  }
+  $effect(() => {
+    unsaved = JSON.stringify(project);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 300);
     return () => clearTimeout(saveTimer);
+  });
+  onMount(() => {
+    const onHidden = () => { if (document.visibilityState === 'hidden') flushSave(); };
+    window.addEventListener('pagehide', flushSave);
+    document.addEventListener('visibilitychange', onHidden);
+    return () => {
+      flushSave();
+      window.removeEventListener('pagehide', flushSave);
+      document.removeEventListener('visibilitychange', onHidden);
+    };
   });
 
   const problems = $derived(renderProblems(project));
@@ -72,6 +89,12 @@
 
   async function openFile(file) {
     if (!file) return;
+    // Like New: opening replaces the current cast and script, so ask first (WCAG 3.3.4).
+    if ((project.cast.length || project.script.length)
+      && !confirm(`Open ${file.name}? It replaces the current cast and script. Save the project first if you want to keep it.`)) {
+      openInput.value = '';
+      return;
+    }
     try {
       replaceProject(JSON.parse(await file.text()));
       announce(`Opened ${file.name}: ${project.cast.length} cast members, ${project.script.length} lines.`);
