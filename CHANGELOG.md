@@ -12,6 +12,23 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 ## [Unreleased]
 
 ### Added
+- **GladTalker Studio UI (phase 2 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio-ui/`, an accessible *Cast → Script → Roll* frontend (Svelte 5 + Vite) served by the engine at `/`. The built `dist/` is committed, so no Node is needed to use it. See [studio-ui/README.md](studio-ui/README.md).
+  - **Cast:** scene upload, Auto-Detect Cast, and color + shape + number speaker badges. Regions are edited by drag, by Arrow/Alt+Arrow keys, through X/Y/W/H steppers, or with Snap to face / Expand to tile. Names, voice presets, pitch, and voice preview.
+  - **Script:** paste-a-script import (adding unknown speakers to the cast), line editing with Play/Up/Down/Delete and Alt+↑/↓, live pronunciation lint with Auto-Fix, natural or target pacing, a full audio-mix preview with a pace meter and timeline, and a captions toggle.
+  - **Roll:**
+    - a checklist that jumps to the field to fix;
+    - framing presets with fit/fill and a described preview, quality, and file name;
+    - render progress by stage with ETA and Cancel;
+    - a captioned player with playback speed, transcript, and downloads.
+  - **Throughout:** autosave plus `.gladtalker.json` save/open, first-run setup (FFmpeg check, Download Models with progress), a Help dialog that stays in the same place, and live-region announcements.
+  - **WCAG 2.2 A/AA design:**
+    - native labelled controls, landmarks, and a skip link;
+    - drag alternatives everywhere, ≥ 36 px targets, and a focus ring never hidden by sticky bars;
+    - verified contrast in light and dark, forced-colors, reduced motion, and 320 px reflow.
+- Engine endpoints for the UI: `GET /uploads/{name}`, `POST /script/lint`, and `POST /audio/preview` (a job that builds the render's exact soundtrack; WAV via `/jobs/{id}/files/audio`). UI responses carry a strict Content-Security-Policy and `nosniff`.
+- UI tests:
+  - 50 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
+  - Playwright end-to-end tests against a real engine: axe WCAG 2.2 A/AA scans of every step in light and dark, keyboard region editing and line reordering, a real audio-mix preview, autosave across reload, Help dialog focus, 320 px reflow, and an opt-in real render.
 - **GladTalker Studio engine (phase 1 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio_server.py` + `src/studio/`, a local FastAPI + WebSocket backend for the upcoming *Cast → Script → Roll* UI ([docs/studio_api.md](docs/studio_api.md)):
   - `/hardware` (device, every CUDA/ROCm/DirectML/MPS GPU, FFmpeg, model readiness) and `/models` + `/models/download` (download job with per-file byte progress).
   - `/cast/detect`: RetinaFace auto-cast tuned for stylized faces (permissive threshold + 2× pass), reading-order badges, and region suggestions that snap to video-call tiles / comic panels.
@@ -31,7 +48,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached per file, bound to the hashed file's own size, mtime, and file ID (read from the open handle and re-checked against the path), with a racy-timestamp guard.
   - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (130 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (137 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.
