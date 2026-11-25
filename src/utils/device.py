@@ -156,7 +156,8 @@ def describe_device(device) -> str:
         dml = _import_directml()
         if dml is not None:
             idx = dev.index if dev.index is not None else 0
-            return f"DirectML:{idx} ({dml.device_name(idx)})"
+            name = (dml.device_name(idx) or "").replace("\x00", "").strip()
+            return f"DirectML:{idx} ({name})"
         return f"DirectML ({dev})"
     if dev.type == "mps":
         return "Apple MPS"

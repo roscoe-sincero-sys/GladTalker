@@ -11,6 +11,25 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 
 ## [Unreleased]
 
+### Added
+- **GladTalker Studio engine (phase 1 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio_server.py` + `src/studio/`, a local FastAPI + WebSocket backend for the upcoming *Cast → Script → Roll* UI ([docs/studio_api.md](docs/studio_api.md)):
+  - `/hardware` (device, every CUDA/ROCm/DirectML/MPS GPU, FFmpeg, model readiness) and `/models` + `/models/download` (download job with per-file byte progress).
+  - `/cast/detect`: RetinaFace auto-cast tuned for stylized faces (permissive threshold + 2× pass), reading-order badges, and region suggestions that snap to video-call tiles / comic panels.
+  - `/script/parse`: paste-a-script importer (`Name: line`, markdown/bullets, parentheticals, screenplay style, continuation lines) with pronunciation lint and one-click fixes; `/tts/preview` voice auditioning with semitone presets.
+  - `/render/start`: generalizes the two-character recreate script to any cast. It supports natural pace or a target duration (≤2× tempo, with an actionable error if the script can't fit) and frame-locked per-speaker turns. Each character is rendered only while speaking. Output presets are 720p, 1080p, vertical, square and source, in fit or fill mode. Encoding is streamed H.264/AAC with `.srt`/`.vtt` captions.
+  - Background job queue (one GPU lane) with live WebSocket progress, measured ETA, rate-limited events, and Cancel that stops SadTalker mid-render.
+  - Localhost-only binding, Host/Origin checks, and an optional bearer token for the desktop sidecar.
+- `tests/`: `unittest` suite (67 tests) for the Studio engine: run `python -m unittest` from the repository root (inside your GladTalker venv)
+
+### Changed
+- `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.
+- `scripts/download_models.py`: `download_file()` accepts a `progress` callback and uses a 60 s network timeout.
+- TTS contraction normalization moved to `src/utils/tts_text.py` (re-exported from `text2speech.py`) so it can be used without loading coqui-tts.
+- `requirements.txt`: added `fastapi`, `uvicorn`, `python-multipart`, and `websockets` for the Studio engine.
+
+### Fixed
+- DirectML device names no longer include a trailing NUL character in `describe_device()`.
+
 ---
 
 ## [0.1.0] - 2026-11-24

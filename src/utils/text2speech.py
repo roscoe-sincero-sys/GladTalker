@@ -1,24 +1,12 @@
 import os
-import re
 import tempfile
 
 from TTS.api import TTS
 
+from src.utils.tts_text import TTS_CONTRACTIONS as _TTS_CONTRACTIONS, normalize_tts_text  # noqa: F401
+
 
 DEFAULT_TTS_MODEL = "tts_models/en/ljspeech/tacotron2-DDC"
-
-# Character-based models like tacotron2-DDC split "'re" contractions into two syllables ("you re").
-_TTS_CONTRACTIONS = [
-    (re.compile(r"\byou['’]re\b", re.IGNORECASE), "your"),
-    (re.compile(r"\bthey['’]re\b", re.IGNORECASE), "their"),
-    (re.compile(r"\bwe['’]re\b", re.IGNORECASE), "where"),
-]
-
-
-def normalize_tts_text(text: str) -> str:
-    for pattern, repl in _TTS_CONTRACTIONS:
-        text = pattern.sub(repl, text)
-    return text
 
 
 class TTSTalker:

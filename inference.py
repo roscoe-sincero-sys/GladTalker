@@ -29,7 +29,9 @@ def main(args):
     ref_eyeblink = args.ref_eyeblink
     ref_pose = args.ref_pose
 
-    current_root_path = os.path.split(sys.argv[0])[0]
+    # Callers that import inference.main (e.g. GladTalker Studio) pass root_path explicitly,
+    # since sys.argv[0] then points at their own entry script rather than inference.py.
+    current_root_path = getattr(args, 'root_path', None) or os.path.split(sys.argv[0])[0]
 
     sadtalker_paths = init_path(args.checkpoint_dir, os.path.join(current_root_path, 'src/config'), args.size, args.old_version, args.preprocess)
 
@@ -48,7 +50,7 @@ def main(args):
                                                                              source_image_flag=True, pic_size=args.size)
     if first_coeff_path is None:
         print("Can't get the coeffs of the input")
-        return
+        return None
 
     if ref_eyeblink is not None:
         ref_eyeblink_videoname = os.path.splitext(os.path.split(ref_eyeblink)[-1])[0]
@@ -93,6 +95,8 @@ def main(args):
 
     if not args.verbose:
         shutil.rmtree(save_dir)
+
+    return save_dir + '.mp4'
 
     
 if __name__ == '__main__':

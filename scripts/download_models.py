@@ -10,6 +10,7 @@ import os
 import sys
 import urllib.request
 from pathlib import Path
+from typing import Callable, Optional
 
 MODELS = [
     (
@@ -55,18 +56,33 @@ def _format_bytes(num_bytes: int) -> str:
     return f"{num_bytes:.1f} GB"
 
 
-def download_file(url: str, dest: Path, force: bool = False) -> None:
+def download_file(
+    url: str,
+    dest: Path,
+    force: bool = False,
+    progress: Optional[Callable[[int, Optional[int]], None]] = None,
+) -> None:
+    """Download ``url`` to ``dest`` atomically via a ``.part`` file.
+
+    Args:
+        progress: Optional callback ``progress(downloaded_bytes, total_bytes_or_None)`` invoked
+            after every chunk. When given, console progress output is suppressed. The callback
+            may raise to abort the download; the partial ``.part`` file is removed.
+    """
+    dest = Path(dest)
     if dest.exists() and not force:
-        print(f"[skip] {dest} ({_format_bytes(dest.stat().st_size)})")
+        if progress is None:
+            print(f"[skip] {dest} ({_format_bytes(dest.stat().st_size)})")
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest.with_suffix(dest.suffix + ".part")
-    print(f"[download] {dest.name} <- {url}")
+    if progress is None:
+        print(f"[download] {dest.name} <- {url}")
 
     req = urllib.request.Request(url, headers={"User-Agent": "GladTalker-Downloader/1.0"})
     try:
-        with urllib.request.urlopen(req) as resp, open(tmp_path, "wb") as out:
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp_path, "wb") as out:
             total = resp.headers.get("Content-Length")
             total_bytes = int(total) if total and total.isdigit() else None
             downloaded = 0
@@ -78,18 +94,23 @@ def download_file(url: str, dest: Path, force: bool = False) -> None:
                     break
                 out.write(chunk)
                 downloaded += len(chunk)
-                if total_bytes:
+                if progress is not None:
+                    progress(downloaded, total_bytes)
+                elif total_bytes:
                     pct = downloaded * 100.0 / total_bytes
                     sys.stdout.write(
                         f"\r  {_format_bytes(downloaded)} / {_format_bytes(total_bytes)} ({pct:5.1f}%)"
                     )
                 else:
                     sys.stdout.write(f"\r  {_format_bytes(downloaded)}")
-                sys.stdout.flush()
-            sys.stdout.write("\n")
+                if progress is None:
+                    sys.stdout.flush()
+            if progress is None:
+                sys.stdout.write("\n")
 
         os.replace(tmp_path, dest)
-        print(f"[ok] {dest}")
+        if progress is None:
+            print(f"[ok] {dest}")
     except Exception:
         if tmp_path.exists():
             tmp_path.unlink()
