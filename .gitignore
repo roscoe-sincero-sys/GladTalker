@@ -177,3 +177,5 @@ checkpoints
 studio-ui/node_modules/
 studio-ui/test-results/
 studio-ui/playwright-report/
+!studio-ui/dist/
+!studio-ui/src/lib/
