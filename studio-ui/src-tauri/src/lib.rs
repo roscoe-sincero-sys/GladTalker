@@ -161,7 +161,7 @@ async fn save_project(app: AppHandle, contents: String, suggested_name: String) 
         };
         // Whole or not at all, and an existing file keeps its access restrictions.
         safe_write::write_atomically(&path, contents.as_bytes())
-            .map_err(|e| format!("Couldn’t save {}: {e}. The previous file, if any, is unchanged.", path.display()))?;
+            .map_err(|e| format!("Couldn’t save {}: {e}", path.display()))?; // says what became of each version
         Ok(Some(path.display().to_string()))
     })
     .await?

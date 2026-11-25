@@ -260,6 +260,19 @@ pub fn start(found: &Located, log_path: &Path, workspace: &Path, extra_origins: 
         log_path: log_path.display().to_string(),
     };
 
+    // The engine runs in its own folder, so a relative workspace would mean a different folder to
+    // it than to this app (a drive-relative `C:workspace` stays relative even after resolving).
+    if !workspace.is_absolute() {
+        return Err(failed(
+            format!(
+                "The engine's workspace must be a full path, but it is “{}”. Set GLADTALKER_STUDIO_WORKSPACE to a full \
+                 path (such as C:\\Renders\\Studio) or to one relative to the folder the app was started in. \
+                 Drive-relative paths like C:workspace aren't supported.",
+                workspace.display()
+            ),
+            String::new(),
+        ));
+    }
     let log = LogSink::new(log_path);
     log.push(&format!("Starting {} studio_server.py in {}", found.python.display(), found.folder.display()));
     let mut child = cmd
@@ -369,7 +382,7 @@ pub fn save_choice(path: &Path, choice: &SavedChoice) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    crate::safe_write::write_atomically(path, serde_json::to_string_pretty(choice)?.as_bytes())
+    crate::safe_write::write_atomically(path, serde_json::to_string_pretty(choice)?.as_bytes()).map_err(std::io::Error::from)
 }
 
 #[cfg(test)]
@@ -493,6 +506,24 @@ mod tests {
         assert_eq!(resolve_workspace(Some(absolute.clone()), base, folder), absolute);
         assert_eq!(resolve_workspace(None, base, folder), workspace_of(folder));
         assert_eq!(resolve_workspace(Some(PathBuf::new()), base, folder), workspace_of(folder));
+
+        // A drive-relative override (Windows) can't be made absolute by joining: start refuses
+        // it before spawning anything, rather than let the app and the engine disagree.
+        if cfg!(windows) {
+            let drive_relative = resolve_workspace(Some(PathBuf::from("C:workspace")), base, folder);
+            assert!(!drive_relative.is_absolute());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_python = Located { folder: tmp.path().to_path_buf(), python: tmp.path().join("no-python") };
+        let refused = start(&missing_python, &tmp.path().join("engine.log"), Path::new("C:workspace"), &[]);
+        match refused {
+            Err(Status::Failed { message, .. }) => {
+                assert!(message.contains("must be a full path"), "{message}");
+                assert!(!message.contains("Couldn't start Python"), "refused before spawning: {message}");
+            }
+            _ => panic!("a relative workspace must be refused"),
+        }
+        assert!(!tmp.path().join("engine.log").exists(), "nothing was started or logged");
 
         // The engine gets that same absolute path (it runs in its own folder, not the app's).
         let found = Located { folder: folder.to_path_buf(), python: folder.join("python") };

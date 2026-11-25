@@ -38,6 +38,13 @@ function engineCommandLines(appPid) {
   return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 }
 
+/** The value after `flag` in a Windows command line: quoted if it has spaces (as Rust quotes it;
+ * the paths here contain no quote characters), bare otherwise. */
+function argAfter(commandLine, flag) {
+  const m = commandLine.match(new RegExp(String.raw`(?:^|\s)${flag}\s+(?:"([^"]*)"|(\S+))`));
+  return m ? (m[1] ?? m[2]) : null;
+}
+
 async function waitFor(check, timeoutMs, what) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -67,7 +74,8 @@ function freePort() {
 
 /** A throwaway profile: WebView2 data (localStorage, so the autosaved project), the app's
  * settings and logs, and the engine workspace, all under one temporary folder. */
-function newProfile(name = 'gladtalker-desktop-') {
+// The names have a space on purpose: paths with spaces (say, a user name with one) must work.
+function newProfile(name = 'gladtalker desktop-') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), name));
   return { root, webview: path.join(root, 'webview2'), data: path.join(root, 'app-data'), workspace: path.join(root, 'workspace') };
 }
@@ -132,7 +140,7 @@ test('the desktop app starts its engine, works end to end, and stops the engine 
     for (const line of engineCommandLines(app.pid)) {
       expect(line).not.toMatch(/--token/);
       expect(line).toContain('--host 127.0.0.1');
-      expect(line).toContain(`--workspace ${profile.workspace}`); // the test's own, made absolute
+      expect(argAfter(line, '--workspace')).toBe(profile.workspace); // the test's own, made absolute
     }
     // The shell checks "Show in folder" against that same absolute workspace.
     const status = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('start_engine'));
@@ -176,7 +184,7 @@ test('the desktop app starts its engine, works end to end, and stops the engine 
 test('a test run never touches another profile’s autosaved draft', async () => {
   test.setTimeout(6 * 60_000);
   // A "user" profile with a draft in it.
-  const user = newProfile('gladtalker-user-');
+  const user = newProfile('gladtalker user-');
   let launched = await launchApp(user);
   await expect(launched.page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
   await launched.page.getByRole('button', { name: 'Next: Script' }).click();

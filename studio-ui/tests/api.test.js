@@ -87,17 +87,53 @@ describe('jobWasRunning', () => {
     expect(await api.jobWasRunning('../x')).toBe(false); // not even requested
     expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
-  it('gives up after a bounded wait, counting the job as not news', async () => {
+  it('gives up after a bounded wait, counting the job as not news, and cancels the request', async () => {
     vi.useFakeTimers();
     try {
-      const api = createApi({ fetchImpl: () => new Promise(() => {}) }); // the engine never answers
-      const answer = api.jobWasRunning('00000000000a', { timeoutMs: 5000 });
-      let settled;
-      answer.then((v) => (settled = v));
+      // The engine never answers; the transport only settles when the request is aborted.
+      const pending = [];
+      const fetchImpl = vi.fn((url, init) => new Promise((resolve, reject) => {
+        pending.push(init.signal);
+        init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      }));
+      const api = createApi({ fetchImpl });
+      const answers = ['00000000000a', '00000000000b', '00000000000c'].map((id) => {
+        const box = {};
+        api.jobWasRunning(id, { timeoutMs: 5000 }).then((v) => (box.value = v));
+        return box;
+      });
       await vi.advanceTimersByTimeAsync(4999);
-      expect(settled).toBeUndefined();
+      expect(answers.map((a) => a.value)).toEqual([undefined, undefined, undefined]);
+      expect(pending.map((s) => s.aborted)).toEqual([false, false, false]);
       await vi.advanceTimersByTimeAsync(1);
+      expect(answers.map((a) => a.value)).toEqual([false, false, false]);
+      expect(pending.map((s) => s.aborted)).toEqual([true, true, true]); // nothing left running
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles at the deadline even if the transport ignores the abort', async () => {
+    vi.useFakeTimers();
+    try {
+      const api = createApi({ fetchImpl: () => new Promise(() => {}) });
+      let settled;
+      api.jobWasRunning('00000000000a', { timeoutMs: 5000 }).then((v) => (settled = v));
+      await vi.advanceTimersByTimeAsync(5000);
       expect(settled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('doesn’t abort a lookup that answered in time', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal;
+      const api = createApi({ fetchImpl: async (url, init) => { signal = init.signal; return json(200, { state: 'running' }); } });
+      expect(await api.jobWasRunning('00000000000a', { timeoutMs: 5000 })).toBe(true);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(signal.aborted).toBe(false);
     } finally {
       vi.useRealTimers();
     }
