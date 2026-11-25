@@ -1,6 +1,7 @@
 """Engine endpoints added for the Studio UI (issue #11, phase 2)."""
 
 import io
+import os
 import shutil
 import tempfile
 import threading
@@ -184,11 +185,12 @@ class PreviewRetentionTests(unittest.TestCase):
         finished = [self._write(store.new_folder(self._finished_job().id, self.jobs)) for _ in range(2)]
         release = threading.Event()
         running = self.jobs.submit("audio.preview", "Preview", lambda ctx: release.wait(10), lane="audio")
-        running_dir = self._write(store.dir / f"20000101_000000_{running.id}")  # oldest name, still running
+        running_dir = self._write(store.dir / f"20000101_000000_000000_{running.id}")  # oldest name, still running
+        stray = self._write(store.dir / "notes")  # not a name this engine generates
         try:
             store.new_folder("current00000", self.jobs)
             remaining = sorted(p.name for p in store.dir.iterdir() if p.is_dir())
-            self.assertEqual(remaining, sorted([running_dir.name, finished[-1].name]))
+            self.assertEqual(remaining, sorted([running_dir.name, finished[-1].name, stray.name]))
             self.assertFalse(orphan.exists())
         finally:
             release.set()
@@ -243,6 +245,25 @@ class PreviewRetentionTests(unittest.TestCase):
             folder = store.new_folder("j2", self.jobs)  # must not raise FileNotFoundError
         self.assertEqual(folder.parent, store.dir)
         self.assertFalse(dead.dir.exists())
+
+    def test_folders_without_proof_of_ownership_are_never_deleted(self):
+        """Only `engine-<12 hex>` folders with an existing, stale, unlocked `.owner.lock` are ever
+        reclaimed. Anything else a user keeps under previews/ survives, however old."""
+        old = time.time() - 7 * 24 * 3600
+        keep = []
+        for name, marker in (("engine-notes", True), ("engine-0123456789ab", False), ("my-stuff", True),
+                             ("engine-0123456789abcdef", True)):
+            folder = self.root / name
+            folder.mkdir(parents=True)
+            (folder / "document.txt").write_text("unrelated", encoding="utf-8")
+            if marker:
+                (folder / ".owner.lock").write_bytes(b"")
+                os.utime(folder / ".owner.lock", (old, old))
+            os.utime(folder, (old, old))
+            keep.append(folder / "document.txt")
+        self._store(stale_s=0).new_folder("j", self.jobs)
+        for doc in keep:
+            self.assertTrue(doc.exists(), doc)
 
     def test_clean_shutdown_removes_its_own_folder(self):
         store = PreviewStore(self.root)

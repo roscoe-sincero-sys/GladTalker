@@ -119,7 +119,7 @@ Every WebSocket message has this shape:
 - Renders run one at a time on a single GPU lane. Model downloads and audio previews each have their own lane, so neither waits behind a render. Only one download job can exist at a time.
 - Audio previews are kept on disk only while they can still be fetched. Several engines can share one workspace, so each engine writes its previews into its own folder, `previews/engine-<id>/`, and holds an OS lock on it while it runs. Before each new preview, the engine:
   - deletes its own previews whose job it no longer knows (dropped from its history), and keeps its 5 newest finished ones;
-  - deletes another engine's folder only once that folder's lock can be taken, which means that engine has exited (the OS releases the lock even after a crash), and the lock file is over a minute old.
+  - deletes another engine's folder only with proof that Studio made it and its engine has exited. The name must be exactly `engine-<12 hex>`, its `.owner.lock` must exist and be over a minute old, and the lock must be free (the OS releases it even after a crash). Anything else under `previews/` is never touched.
 
   Queued and running previews are never touched, and an engine deletes its own folder when it shuts down cleanly. Renders are never deleted.
 

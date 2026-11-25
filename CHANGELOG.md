@@ -34,12 +34,13 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - A preview's timing and audio are shown together, and only for the newest preview.
   - Auto-Fix suggestions belong to the exact text they were made for, and disappear as soon as the line changes.
   - A finished video is shown even if its captions fail to load, and the captions have their own retry.
+  - Cancel's answer is only an acknowledgement; the job watcher alone sets the render's state, so a late answer can't bring back a render that has ended.
   - Job watchers stop on 401/403/404, back off on network errors, and close when their step closes.
   - `blob:` media URLs are released, and voice clips play one at a time.
   - The engine's limits (8 cast members, 500 lines, 1000 characters a line) are checked in the UI, and the checklist and audio preview say where to fix them.
   - Reordering keeps keyboard focus at the ends of the list.
   - Downloads keep their file names in token mode.
-- Audio previews no longer pile up on disk. Each engine keeps its previews in its own locked folder: its previews whose job is gone are deleted, and its 5 newest finished ones are kept. Another engine's folder is reclaimed only after that engine has exited, so two engines can safely share one workspace (and two engines racing to reclaim the same folder both carry on).
+- Audio previews no longer pile up on disk. Each engine keeps its previews in its own locked folder: its previews whose job is gone are deleted, and its 5 newest finished ones are kept. Another engine's folder is reclaimed only with proof that Studio made it: an `engine-<id>` name, plus an existing ownership lock that is free because that engine has exited. Anything else under `previews/` is never deleted. So two engines can safely share one workspace, and two engines racing to reclaim the same folder both carry on.
 - UI tests:
   - 66 Vitest unit/component tests, including axe-core checks and WCAG contrast checks of every theme token and badge.
   - Playwright end-to-end tests against a real engine:
@@ -47,7 +48,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
     - keyboard region editing, and line reordering with focus kept at the ends of the list;
     - a real audio-mix preview and autosave across reload;
     - a slow import racing an Open project;
-    - stale Auto-Fix suggestions, a render accepted after leaving Roll, a slow re-attach to a saved render, and a duplicate preview submission;
+    - stale Auto-Fix suggestions, a render accepted after leaving Roll, a slow re-attach to a saved render, a late Cancel acknowledgement, and a duplicate preview submission;
     - forged job ids in an opened project (no job request is made), and no removed dialogue in a saved project file;
     - the `#token=` launch against a token-protected engine, and a caption download failure in token mode;
     - Help dialog focus and 320 px reflow;
@@ -71,7 +72,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached per file, bound to the hashed file's own size, mtime, and file ID (read from the open handle and re-checked against the path), with a racy-timestamp guard.
   - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (147 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (148 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.

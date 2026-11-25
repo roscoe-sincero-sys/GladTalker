@@ -53,7 +53,7 @@ npm run e2e      # Playwright: starts an engine and drives the built dist/ in Ch
   - the real audio preview and autosave;
   - Auto-Fix suggestions hidden as soon as their line changes;
   - a slow import racing an Open project;
-  - a render accepted after leaving Roll, which Roll follows when shown again, and a slow re-attach to a saved render that blocks a second one (render jobs are mocked here, so no GPU time);
+  - a render accepted after leaving Roll, which Roll follows when shown again, a slow re-attach to a saved render that blocks a second one, and a late Cancel acknowledgement (render jobs are mocked here, so no GPU time);
   - a project file with forged job ids, which makes no job request;
   - a saved project file that contains no dialogue removed after a preview;
   - a duplicate preview click while one is being submitted;

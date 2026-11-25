@@ -27,12 +27,17 @@
   let startError = $state('');
   let mediaError = $state(''); // the video couldn't be fetched (token mode); Retry
   let captionError = $state(''); // the caption files couldn't be fetched; Retry captions
+  let cancelPendingFor = $state(null); // Cancel pressed for this job id; shown until it ends
   let attachedId = null; // the render this view is following
   let watch = null; // its watcher; closed when the step closes or another render starts
   let destroyed = false;
 
   const problems = $derived(renderProblems(project, { models: engine.models, ffmpeg: engine.hardware?.ffmpeg?.available ?? null }));
   const running = $derived(job && (job.state === 'queued' || job.state === 'running'));
+  // What the progress panel shows: the watcher's snapshot, marked "Cancelling…" between pressing
+  // Cancel and the engine's own update. Once the job has ended, only its real state is shown.
+  const shownJob = $derived(running && cancelPendingFor === job.id && !job.cancel_requested
+    ? { ...job, cancel_requested: true } : job);
   // Following a saved render whose state hasn't arrived yet (slow connection, engine busy): treat
   // it as running until the engine says it has finished or is gone, so it can't be doubled up.
   const checking = $derived(Boolean(project.lastRenderJobId && !job));
@@ -79,6 +84,7 @@
 
   function attach(id) {
     attachedId = id;
+    cancelPendingFor = null;
     watch?.close();
     watch = null;
     job = null;
@@ -157,11 +163,16 @@
     }
   }
 
+  // The cancel answer is only an acknowledgement: the watcher stays the one source of the job's
+  // state, so a late answer can never put a finished render back to "Cancelling".
   async function cancel() {
+    const id = job.id;
+    cancelPendingFor = id;
     try {
-      job = await api.cancelJob(job.id);
-      announce('Cancelling the render…');
+      await api.cancelJob(id);
+      if (attachedId === id) announce('Cancelling the render…');
     } catch (err) {
+      if (cancelPendingFor === id) cancelPendingFor = null;
       announceError(err.message);
     }
   }
@@ -252,7 +263,7 @@
     {#if problems.length}<p class="muted" id="render-blocked">Fix the items above to enable rendering.</p>{/if}
     {#if checking}<p class="muted" role="status">Checking on the last render…</p>{/if}
     {#if startError}<p class="error-text">{startError}</p>{/if}
-    <JobProgress {job} id="render-job" label="Render progress" oncancel={running ? cancel : null}
+    <JobProgress job={shownJob} id="render-job" label="Render progress" oncancel={running ? cancel : null}
       stageLabels={{ audio: 'Voices and timing', compose: 'Compose and encode' }} />
 
     {#if result && mediaError}

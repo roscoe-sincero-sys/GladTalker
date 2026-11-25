@@ -9,10 +9,13 @@ long as it runs. Before each new preview:
 * **Its own folder:** previews whose job this engine no longer knows (dropped from its job
   history) are deleted, and only the newest ``keep`` finished previews stay. Queued and running
   previews are never touched.
-* **Other engines' folders:** deleted only if their lock can be taken, which means the owner has
-  exited (the OS releases the lock when a process ends, even if it crashed). Folders whose lock
-  file is younger than ``STALE_S`` are left alone, so an engine that is still setting up its
-  folder is never mistaken for a dead one.
+* **Other engines' folders:** deleted only with proof that Studio made them and their engine has
+  exited: the name must be exactly ``engine-<12 hex>``, the ``.owner.lock`` marker must exist and
+  be over ``STALE_S`` old, and its lock must be free (the OS releases it when a process ends, even
+  after a crash). Anything else in ``previews/``, marked or not, is never touched.
+
+Inside its own folder an engine likewise only deletes preview folders with the names it
+generates.
 
 When an engine shuts down cleanly it deletes its own folder: nothing in it can be fetched once
 its jobs are gone.
@@ -21,6 +24,7 @@ its jobs are gone.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 import time
@@ -30,6 +34,8 @@ from typing import Optional
 
 PREFIX = "engine-"
 LOCK_NAME = ".owner.lock"
+ENGINE_DIR_RE = re.compile(r"^engine-[0-9a-f]{12}$")
+PREVIEW_DIR_RE = re.compile(r"^\d{8}_\d{6}_\d{6}_[0-9A-Za-z]+$")  # what new_folder() names
 STALE_S = 60.0
 
 
@@ -122,8 +128,8 @@ class PreviewStore:
         known = {j.id: j for j in jobs.list()}
         finished = []
         for folder in self.dir.iterdir():
-            if not folder.is_dir():
-                continue
+            if not folder.is_dir() or not PREVIEW_DIR_RE.match(folder.name):
+                continue  # not a preview folder this engine made: leave it
             job_id = folder.name.rsplit("_", 1)[-1]
             job = known.get(job_id)
             if job_id == current or (job is not None and not job.done):
@@ -139,23 +145,21 @@ class PreviewStore:
     def _reclaim_others(self) -> None:
         now = time.time()
         for folder in self.root.iterdir():
-            if not folder.is_dir() or not folder.name.startswith(PREFIX) or folder == self.dir:
-                continue
+            if folder == self.dir or not ENGINE_DIR_RE.match(folder.name) or not folder.is_dir():
+                continue  # not an engine folder Studio made
             marker = folder / LOCK_NAME
             try:
-                age = now - (marker if marker.exists() else folder).stat().st_mtime
+                if not marker.is_file() or now - marker.stat().st_mtime < self.stale_s:
+                    continue  # no proof of ownership, or an engine that may still be starting up
             except OSError:
-                continue
-            if age < self.stale_s:
-                continue  # possibly an engine that is just starting up
-            if marker.exists():
-                lock = _FileLock(marker)
-                try:
-                    if not lock.acquire(create=False):
-                        continue  # its engine is running: hands off
-                except FileNotFoundError:
-                    continue  # another engine reclaimed this folder first: nothing left to do
-                except OSError:
-                    continue  # can't tell (permissions, a share hiccup): leave it for next time
-                lock.release()
+                continue  # vanished meanwhile: another engine reclaimed it
+            lock = _FileLock(marker)
+            try:
+                if not lock.acquire(create=False):
+                    continue  # its engine is running: hands off
+            except FileNotFoundError:
+                continue  # another engine reclaimed this folder first: nothing left to do
+            except OSError:
+                continue  # can't tell (permissions, a share hiccup): leave it for next time
+            lock.release()
             shutil.rmtree(folder, ignore_errors=True)

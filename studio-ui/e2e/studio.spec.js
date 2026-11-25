@@ -30,14 +30,21 @@ async function openStudio(page) {
 
 const tokenBase = () => `http://127.0.0.1:${Number(process.env.GLADTALKER_E2E_PORT || 7863) + 1}`;
 
-/** Holds the next request matching `pattern` until the returned release() is called. */
+/** Holds the next request matching `pattern` until the returned release() is called;
+ * `release.reached` resolves once that request has arrived and is being held. Playwright tries
+ * the most recently added matching route first, so add any fallback route for the same URL
+ * *before* calling this. */
 async function hold(page, pattern, answer = (route) => route.continue()) {
   let release;
+  let arrived;
   const released = new Promise((r) => (release = r));
+  const reached = new Promise((r) => (arrived = r));
   await page.route(pattern, async (route) => {
+    arrived();
     await released;
     await answer(route);
   }, { times: 1 });
+  release.reached = reached;
   return release;
 }
 
@@ -267,19 +274,47 @@ test('coming back to a saved render blocks a second one until its state is known
   await expect.poll(async () => (await savedProject(page)).lastRenderJobId).toBe('fa0000000003');
 
   // Reload with a slow engine: the first status answer for that render is held back.
-  await page.unroute('**/jobs/fa0000000003');
+  // (The fallback route stays registered first, so the one-shot hold below takes precedence.)
   const release = await hold(page, '**/jobs/fa0000000003', (route) => route.fulfill({ json: renderSnapshot('fa0000000003', 'running') }));
-  await page.route('**/jobs/fa0000000003', (route) => route.fulfill({ json: renderSnapshot('fa0000000003', 'running') }));
   let starts = 0;
   page.on('request', (r) => { if (r.url().endsWith('/render/start')) starts++; });
   await page.reload();
   await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Roll/ }).click();
+  await release.reached; // the status request is now being held
   await expect(page.getByText('Checking on the last render…')).toBeVisible();
   await expect(page.getByRole('button', { name: /Render video/ })).toBeDisabled();
   release();
   await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
   await expect(page.getByRole('button', { name: /Render video/ })).toBeDisabled();
   expect(starts).toBe(0);
+});
+
+test('a late Cancel acknowledgement never brings back a render that has already ended', async ({ page }) => {
+  await openStudio(page);
+  await readyToRoll(page);
+  const id = 'fa0000000004';
+  let state = 'running';
+  await fakeRender(page, id, () => renderSnapshot(id, state, state === 'cancelled' ? { message: 'Cancelled.' } : {}));
+  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot(id, 'queued') }));
+  await page.getByRole('button', { name: /Render video/ }).click();
+  await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
+
+  const release = await hold(page, `**/jobs/${id}/cancel`,
+    (route) => route.fulfill({ json: renderSnapshot(id, 'running', { cancel_requested: true }) }));
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await release.reached;
+  await expect(page.getByRole('button', { name: 'Cancelling…' })).toBeDisabled();
+  state = 'cancelled'; // the engine stops the render; the watcher sees it and stops polling
+  await expect(page.getByRole('button', { name: 'Cancelling…' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+
+  const acked = page.waitForResponse(`**/jobs/${id}/cancel`);
+  release(); // the old "running, cancel requested" answer arrives last
+  await acked;
+  await page.waitForTimeout(300);
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Cancelling…' })).toHaveCount(0);
+  await expect(page.getByText('Cancelled.').first()).toBeVisible();
 });
 
 test('a project file never contains a saved job id it shouldn’t follow, or lines removed after a preview', async ({ page }) => {
