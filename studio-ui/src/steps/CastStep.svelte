@@ -51,8 +51,14 @@
   });
 
   async function chooseFile(file) {
-    fileError = '';
     if (!file) return;
+    // One upload at a time, from the picker or a drop: a second one could finish first and then
+    // be overwritten by the older answer.
+    if (uploading) {
+      announce('Still uploading the previous image. Try again when it has finished.');
+      return;
+    }
+    fileError = '';
     if (!/^image\/(png|jpeg|bmp|webp)$/.test(file.type) && !/\.(png|jpe?g|bmp|webp)$/i.test(file.name)) {
       fileError = `“${file.name}” isn’t a supported image. Use PNG, JPEG, BMP, or WebP.`;
       return;

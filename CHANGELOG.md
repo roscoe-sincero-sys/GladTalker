@@ -110,7 +110,8 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - At 320 px with WCAG text spacing, the **Detection sensitivity** field no longer pushes the page sideways (1.4.10, 1.4.12).
   - **New** and **Open…** ask before replacing a project with any work in it: a scene, cast, script, or changed setting. Previously **New** asked only if there was a cast or script, and **Open…** never asked. Open reads the file before asking (3.3.4).
   - Focus is no longer hidden behind a footer that wraps to two lines (for example, with a long GPU name): the scroll padding follows the bars' real heights. In windows under 480 px wide or tall, the bars scroll with the page (2.4.11).
-  - Buttons that start work, and steppers at their limit, no longer drop keyboard focus to the page: they are marked unavailable (`aria-disabled`) instead of `disabled` (2.4.3, 4.1.3).
+  - Buttons that start work, and steppers at their limit, no longer drop keyboard focus to the page: they are marked unavailable (`aria-disabled`) instead of `disabled`, and do nothing while unavailable (2.4.3, 4.1.3).
+  - Choosing or dropping a second image while one is uploading is turned away with a message. Before, the older upload could finish last and replace the newer scene.
   - The desktop app now supports Ctrl+Plus, Ctrl+Minus and Ctrl+0 zoom (`zoomHotkeysEnabled`), and Help lists these shortcuts (1.4.4).
   - The Roll step's hint names its section instead of saying "above" (1.3.3).
 - DirectML device names no longer include a trailing NUL character in `describe_device()`.

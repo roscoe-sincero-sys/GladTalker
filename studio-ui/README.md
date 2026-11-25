@@ -91,7 +91,7 @@ npm run tauri:build   # release build + installer (Windows: src-tauri/target/rel
   - closing the app stops the engine;
   - killing the app stops the engine too;
   - Windows UI Automation (what Narrator, NVDA, and JAWS read) exposes named controls, the step headings, the landmarks, and the skip link (`e2e-desktop/uia-tree.ps1`);
-  - real Ctrl+Plus key presses zoom the app to 200 %, and it still fits and works. `e2e-desktop/send-keys.ps1` types them only when the app window is in front, so keys never go to another program. Don't use the keyboard while this test runs.
+  - real Ctrl+Plus key presses zoom the app to 200 %, and it still fits and works. `e2e-desktop/send-keys.ps1` types them only when the app window is in front, so keys never go to another program. If Windows won't bring the window to the front (a service or remote session, or another app holding the foreground), this check is **skipped**, with the reason, and the other checks still run. On a desktop session, `npm run e2e:desktop:interactive` makes that a failure instead. Don't use the keyboard while it runs.
 
   Set `GLADTALKER_DESKTOP_EXE` to test another build.
 

@@ -324,6 +324,27 @@ test('token mode: a caption download failure still shows the video, and captions
   await expect(page.getByText(/captions couldn’t be loaded/)).toHaveCount(0);
 });
 
+test('a second image dropped while one is uploading is turned away, so an older upload can’t replace a newer scene', async ({ page }) => {
+  await openStudio(page);
+  const uploads = [];
+  page.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/uploads')) uploads.push(r.url()); });
+  const release = await hold(page, '**/uploads');
+  await page.getByLabel('Scene image').setInputFiles(PORTRAIT);
+  await release.reached; // the first upload is waiting for the engine
+  // Drop a second image on the drop zone.
+  await page.locator('.drop').evaluate((zone) => {
+    const data = new DataTransfer();
+    data.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'second.png', { type: 'image/png' }));
+    zone.dispatchEvent(new DragEvent('drop', { dataTransfer: data, bubbles: true, cancelable: true }));
+  });
+  await expect(page.locator('[role="status"][aria-live="polite"]').last()).toHaveText(/Still uploading the previous image/);
+  release();
+  await expect(page.getByRole('img', { name: /Scene: people_0\.png/ })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(uploads).toHaveLength(1);
+  expect((await savedProject(page)).image.name).toBe('people_0.png');
+});
+
 test('help dialog: Esc closes it and focus returns to Help', async ({ page }) => {
   await openStudio(page);
   const help = page.getByRole('button', { name: /Help/ });

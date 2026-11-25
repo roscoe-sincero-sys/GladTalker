@@ -223,9 +223,24 @@ test('if the app crashes, its engine still shuts itself down', async () => {
 });
 
 /** Types real keystrokes into the app's window (only if it is in front; see send-keys.ps1). */
+// Real keystrokes need the app's window in front, which Windows doesn't always allow (for example
+// in a service or remote session, or while another app holds the foreground). Then the check is
+// skipped, with the reason. GLADTALKER_DESKTOP_INTERACTIVE=1 (npm run e2e:desktop:interactive)
+// makes it a failure instead, for runs on a desktop where it must work.
+const MUST_TYPE = process.env.GLADTALKER_DESKTOP_INTERACTIVE === '1';
+
+/** Types real keystrokes into the app's window (only if it is in front; see send-keys.ps1).
+ * Returns false if Windows wouldn't bring the window to the front (nothing was typed). */
 function sendKeys(appPid, keys, times = 1) {
-  execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-    path.join(import.meta.dirname, 'send-keys.ps1'), '-AppPid', String(appPid), '-Keys', keys, '-Times', String(times)], { encoding: 'utf-8' });
+  try {
+    execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+      path.join(import.meta.dirname, 'send-keys.ps1'), '-AppPid', String(appPid), '-Keys', keys, '-Times', String(times)],
+    { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return true;
+  } catch (err) {
+    if (err.status === 3 && !MUST_TYPE) return false; // not in front: nothing was sent
+    throw err;
+  }
 }
 
 /** What Windows UI Automation (Narrator, NVDA, JAWS) exposes for the app's window. */
@@ -288,7 +303,9 @@ test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (
     const normal = await layout();
     // WebView2's zoom steps: 110, 125, 150, 175, 200 %. Zoom only answers real keyboard input
     // (not keys sent over the DevTools protocol), so these are typed into the app's window.
-    sendKeys(app.pid, '^{ADD}', 5);
+    const typed = sendKeys(app.pid, '^{ADD}', 5);
+    test.skip(!typed, 'Windows would not bring the app window to the front, so no keys could be typed. '
+      + 'Run npm run e2e:desktop:interactive on a desktop session to require this check.');
     await expect.poll(async () => (await layout()).width).toBeLessThanOrEqual(Math.ceil(normal.width / 2) + 2);
     const zoomed = await layout();
     expect(zoomed.ratio).toBeCloseTo(normal.ratio * 2, 1);
@@ -296,7 +313,7 @@ test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (
     await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
     await page.getByRole('button', { name: 'Next: Script' }).click(); // still works
     await expect(page.getByRole('heading', { name: 'Step 2 of 3: Script' })).toBeVisible();
-    sendKeys(app.pid, '^0');
+    expect(sendKeys(app.pid, '^0')).toBe(true);
     await expect.poll(async () => (await layout()).width).toBe(normal.width);
   } finally {
     await closeApp(launched);
