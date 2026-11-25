@@ -1,0 +1,2 @@
+# Built UI: store byte-for-byte (no CRLF conversion), so rebuilding shows no spurious changes.
+studio-ui/dist/** -text
