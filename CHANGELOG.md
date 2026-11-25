@@ -12,6 +12,20 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 ## [Unreleased]
 
 ### Added
+- **GladTalker Studio desktop app (phase 3 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio-ui/src-tauri/`, a Tauri v2 shell around the Studio UI. On Windows it builds a 1.3 MB NSIS installer. See [studio-ui/README.md](studio-ui/README.md#desktop-app).
+  - **Engine:** the app finds the GladTalker folder and its venv (`GLADTALKER_HOME`, a folder chosen once with a native dialog, or the folders around the app) and starts `studio_server.py` on a free port with a fresh 256-bit token. It stops the engine's whole process tree on exit. If something goes wrong, a setup screen says what's missing, shows the engine's last messages, and offers **Choose GladTalker folder…** and **Try again**.
+  - **Native features:**
+    - **Save project…** opens a Save dialog.
+    - **Show the video in its folder** works only for files inside the engine's workspace.
+    - A notification fires when a render ends while the app is in the background.
+    - Render progress appears on the taskbar icon.
+  - **Security:** the page has a strict CSP and only the app's own commands, with no plugin permissions granted to it.
+  - **Tests:** Rust unit tests cover engine discovery, the ready line, tokens, and the workspace check. Desktop end-to-end tests (`npm run e2e:desktop`) launch the real app and attach to its WebView2:
+    - start → axe scan → upload, detect, and a real audio preview;
+    - closing the app stops the engine;
+    - killing the app still stops the engine.
+- `studio_server.py --exit-with-parent PID`: the engine shuts down when the program that started it ends, even after a crash.
+- `studio_server.py --open` (web mode): opens the Studio UI in your browser once the engine is ready.
 - **GladTalker Studio UI (phase 2 of [#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11))**: `studio-ui/`, an accessible *Cast → Script → Roll* frontend (Svelte 5 + Vite) served by the engine at `/`. The built `dist/` is committed, so no Node is needed to use it. See [studio-ui/README.md](studio-ui/README.md).
   - **Cast:** scene upload, Auto-Detect Cast, and color + shape + number speaker badges. Regions are edited by drag, by Arrow/Alt+Arrow keys, through X/Y/W/H steppers, or with Snap to face / Expand to tile. Names, voice presets, pitch, and voice preview.
   - **Script:** paste-a-script import (adding unknown speakers to the cast), line editing with Play/Up/Down/Delete and Alt+↑/↓, live pronunciation lint with Auto-Fix, natural or target pacing, a full audio-mix preview with a pace meter and timeline, and a captions toggle.
@@ -72,7 +86,7 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
   - Readiness, render admission, and skip/repair decisions all require a checksum match, so truncated and same-size damaged files are reported and repaired. Digests are cached per file, bound to the hashed file's own size, mtime, and file ID (read from the open handle and re-checked against the path), with a racy-timestamp guard.
   - A damaged file that can't be replaced is never reported as repaired.
 - `src/utils/safe_io.py`: Unicode-safe `imread`/`imwrite` and FFmpeg resolution (`GLADTALKER_FFMPEG`).
-- `tests/`: `unittest` suite (148 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
+- `tests/`: `unittest` suite (151 tests) for the Studio engine and the shared helpers it relies on. Run `python -m unittest` from the repository root, inside your GladTalker venv.
 
 ### Changed
 - `inference.main()` now returns the generated video path and accepts `args.root_path` so it can be called from other entry points.

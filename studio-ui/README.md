@@ -35,6 +35,50 @@ The project saves itself in the browser as you work. **Save project** / **Open�
 - **Display settings:** follows the OS light/dark theme, Windows High Contrast (`forced-colors`), and reduced motion. The layout reflows down to 320 px wide (1.4.10).
 - **Help:** the Help button is in the same top-right place on every step (3.2.6).
 
+## Desktop app
+
+`src-tauri/` wraps the same UI in a **Tauri v2** desktop app, **GladTalker Studio**. Python isn't bundled: the app uses your GladTalker folder and its Python environment, the same one you'd use for `python studio_server.py`.
+
+**Finding the engine.** When it starts, the app looks for a folder that contains `studio_server.py`, in this order:
+1. the `GLADTALKER_HOME` environment variable;
+2. the folder you chose earlier with **Choose GladTalker folder…**;
+3. the folders around the app itself (for example, a development build inside the repository).
+
+Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that order. Set `GLADTALKER_PYTHON` to use a different interpreter. If no folder is found, or the engine fails to start, the app explains why, shows the engine's last messages (the full log is in the app's log folder), and offers **Choose GladTalker folder…** and **Try again**.
+
+**What the app does:**
+- **Engine lifecycle:** it starts the engine on a free port with a fresh random token, and nothing else on the computer is told either. It stops the engine when you close the app. The engine also watches the app's process (`--exit-with-parent`), so it stops even if the app crashes.
+- **Saving:** **Save project** opens a native Save dialog. **Open…** uses the system file picker.
+- **Finished videos:** **Show the video in its folder** opens the file manager. It only works for files the engine wrote, inside its workspace.
+- **While rendering:**
+  - Render progress appears on the taskbar icon.
+  - A notification fires when a render finishes or fails while you're working in another window.
+
+**Security:** the window's Content-Security-Policy only allows the app's own files plus connections to `127.0.0.1`. The page can call only the app's own commands; the dialog, notification, and opener plugins are used from Rust, and no plugin permissions are granted to the page.
+
+### Building the desktop app
+
+You need Node, plus [Rust](https://rustup.rs/) and the platform prerequisites for Tauri. On Windows that means the Microsoft C++ Build Tools ("Desktop development with C++") and WebView2, which comes with Windows 11.
+
+```bash
+cd studio-ui
+npm install
+npm run tauri:dev     # run it against the Vite dev server (hot reload)
+npm run tauri:build   # release build + installer (Windows: src-tauri/target/release/bundle/nsis/*.exe)
+```
+
+### Testing the desktop app
+
+- `cd src-tauri && cargo test` runs the Rust unit tests: engine discovery, the ready line, tokens, and the workspace check.
+- `npm run e2e:desktop` (Windows, after `npm run tauri:build`) launches the built app with `GLADTALKER_HOME` set to this repository, attaches Playwright to its WebView2 over the DevTools protocol, and checks that:
+  - the engine starts;
+  - there are no axe WCAG 2.2 A/AA violations;
+  - an upload, face detection, and a real audio preview work;
+  - closing the app stops the engine;
+  - killing the app stops the engine too.
+
+  Set `GLADTALKER_DESKTOP_EXE` to test another build.
+
 ## Development
 
 ```bash
@@ -71,5 +115,7 @@ npm run e2e      # Playwright: starts an engine and drives the built dist/ in Ch
 | `src/App.svelte` | Shell: header with stepper, project buttons, and Help; live regions; autosave |
 | `src/steps/` | `CastStep`, `ScriptStep`, `RollStep` |
 | `src/components/` | Stage, cast card, dialogue row, number field, progress, setup, help, badge |
-| `src/lib/` | API client, project state and persistence, region geometry, validation, palette |
+| `src/lib/` | API client, project state and persistence, region geometry, validation, palette, desktop bridge |
+| `src-tauri/` | Desktop app (Tauri v2): engine discovery and lifecycle, native dialogs, notifications |
+| `e2e-desktop/` | End-to-end tests of the built desktop app |
 | `tests/` / `e2e/` | Vitest / Playwright |

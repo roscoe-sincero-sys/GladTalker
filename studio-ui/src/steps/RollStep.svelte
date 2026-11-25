@@ -9,6 +9,7 @@
   import { frameLayout } from '../lib/regions.js';
   import { duration, timestamp } from '../lib/format.js';
   import JobProgress from '../components/JobProgress.svelte';
+  import { isDesktop, desktopCall } from '../lib/desktop.js';
 
   const PRESETS = [
     { id: 'hd720', label: '16:9 HD', size: [1280, 720], note: 'Video calls, presentations' },
@@ -149,6 +150,16 @@
     }
     if (!mine()) return fetched.forEach(revokeMedia);
     setMedia(videoUrl, ...fetched);
+  }
+
+  const onDesktop = isDesktop();
+
+  async function showInFolder() {
+    try {
+      await desktopCall('reveal_file', { path: result.video_path });
+    } catch (err) {
+      announceError(err.message);
+    }
   }
 
   async function render() {
@@ -304,6 +315,9 @@
           {#if vttUrl}<li><a href={vttUrl} download={basename(result.vtt_path)}>Download captions (WebVTT)</a></li>{/if}
         </ul>
         <p class="muted">Saved on this computer in <code>{result.output_dir}</code></p>
+        {#if onDesktop}
+          <button type="button" onclick={showInFolder}>Show the video in its folder</button>
+        {/if}
         {#if result.captions?.length}
           <details>
             <summary>Transcript</summary>

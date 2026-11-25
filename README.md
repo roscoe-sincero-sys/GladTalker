@@ -228,9 +228,14 @@ You can also start it more easily:
 
 **GladTalker Studio** ([#11](https://github.com/roscoe-sincero-sys/GladTalker/issues/11)) turns a picture and a script into a multi-character talking scene in three steps, **Cast → Script → Roll**, with no terminal commands or Python editing. The interface is designed for WCAG 2.2 AA: it works fully by keyboard and with screen readers, never needs dragging, reflows at 320 px, and supports light/dark/High Contrast.
 
-```bash
-python studio_server.py            # then open http://127.0.0.1:7860 (API docs at /docs)
-```
+There are two ways to run it, both using your GladTalker folder and its Python environment:
+
+- **Desktop app (Windows, macOS, Linux):** install or build **GladTalker Studio** ([studio-ui/README.md](studio-ui/README.md#desktop-app)). It finds your GladTalker folder (or asks for it once), starts the engine in the background, and stops it when you close the app. It adds native Save dialogs, **Show in folder** for finished videos, a notification when a render finishes, and progress on the taskbar icon.
+- **Web mode:** run the engine and use your browser.
+
+  ```bash
+  python studio_server.py --open     # opens http://localhost:7860 (API docs at /docs)
+  ```
 
 The engine serves the UI and a FastAPI + WebSocket API for hardware detection, model downloads, face auto-casting, voice and full-mix previews, script import, and render jobs with live progress and `.srt`/`.vtt` captions. See [studio-ui/README.md](studio-ui/README.md) for the UI and [docs/studio_api.md](docs/studio_api.md) for the API.
 

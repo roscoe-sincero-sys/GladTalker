@@ -7,6 +7,9 @@
   import Stepper from './components/Stepper.svelte';
   import HelpDialog from './components/HelpDialog.svelte';
   import SetupPanel from './components/SetupPanel.svelte';
+  import EngineSetup from './components/EngineSetup.svelte';
+  import { isDesktop, desktopCall } from './lib/desktop.js';
+  import { startRenderMonitor } from './lib/render-monitor.svelte.js';
   import CastStep from './steps/CastStep.svelte';
   import ScriptStep from './steps/ScriptStep.svelte';
   import RollStep from './steps/RollStep.svelte';
@@ -14,7 +17,17 @@
   let helpOpen = $state(false);
   let openInput = $state();
 
-  onMount(connectEngine);
+  const onDesktop = isDesktop();
+
+  onMount(() => {
+    connectEngine();
+  });
+
+  // Desktop app: taskbar progress and a notification when a render ends (whichever step is open).
+  let stopMonitor = null;
+  $effect(() => {
+    if (onDesktop && engine.status === 'ready' && !stopMonitor) stopMonitor = startRenderMonitor();
+  });
 
   // Auto-save shortly after any change (WCAG 3.3.7: nothing is entered twice).
   let saveTimer;
@@ -34,11 +47,22 @@
     && (!engine.models?.complete || !engine.hardware?.ffmpeg?.available));
   const index = $derived(STEPS.findIndex((s) => s.id === nav.step));
 
-  function saveFile() {
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
+  async function saveFile() {
+    const contents = JSON.stringify(project, null, 2);
     const base = (project.output.filename || project.cast.map((m) => m.name).join('-') || 'project')
       .replace(/[^\w.-]+/g, '_').slice(0, 60);
+    if (onDesktop) {
+      // A native Save dialog: the user picks the folder and name.
+      try {
+        const path = await desktopCall('save_project', { contents, suggestedName: `${base}.gladtalker.json` });
+        if (path) announce(`Project saved to ${path}.`);
+      } catch (err) {
+        announceError(err.message);
+      }
+      return;
+    }
+    const blob = new Blob([contents], { type: 'application/json' });
+    const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${base}.gladtalker.json`;
     a.click();
@@ -95,11 +119,19 @@
       <section class="card offline" aria-labelledby="offline-heading">
         <h2 id="offline-heading">Can’t reach the GladTalker engine</h2>
         <p>{engine.error}</p>
-        <p>Start it with <code>python studio_server.py</code> (in the GladTalker folder), then try again.</p>
-        <button type="button" class="primary" onclick={connectEngine}>Try again</button>
+        {#if onDesktop}
+          <p>The engine may have stopped. Try again to restart it.</p>
+        {:else}
+          <p>Start it with <code>python studio_server.py</code> (in the GladTalker folder), then try again.</p>
+        {/if}
+        <button type="button" class="primary" onclick={() => connectEngine()}>Try again</button>
       </section>
+    {:else if engine.status === 'setup'}
+      <EngineSetup />
     {:else if engine.status === 'connecting'}
-      <p role="status">Connecting to the GladTalker engine…</p>
+      <p role="status">
+        {onDesktop ? 'Starting the GladTalker engine… This can take up to a minute the first time.' : 'Connecting to the GladTalker engine…'}
+      </p>
     {:else}
       {#if needsSetup}<SetupPanel />{/if}
       {#if nav.step === 'cast'}<CastStep />{:else if nav.step === 'script'}<ScriptStep />{:else}<RollStep />{/if}

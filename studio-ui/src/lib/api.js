@@ -225,3 +225,9 @@ export function basename(path) {
 }
 
 export const api = createApi({ token: readEngineToken() });
+
+/** Point the shared client at another engine (the desktop app's private port and token). Every
+ * module keeps using the same `api` object. */
+export function configureApi(options) {
+  Object.assign(api, createApi(options));
+}

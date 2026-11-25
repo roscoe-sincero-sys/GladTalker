@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -208,6 +209,44 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("without a token", err)
         self.assertEqual(out, "")
+
+    def test_exits_when_the_parent_process_ends(self):
+        """--exit-with-parent: the desktop app crashing (or being killed) must not leave the
+        engine running in the background."""
+        parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        proc = self._launch("--port", "0", "--log-level", "warning", "--exit-with-parent", str(parent.pid))
+        try:
+            self.assertEqual(json.loads(proc.stdout.readline())["event"], "listening")
+            time.sleep(1)
+            self.assertIsNone(proc.poll(), "the engine runs while its parent does")
+            parent.kill()
+            parent.wait(timeout=30)
+            self.assertEqual(proc.wait(timeout=30), 0)
+        finally:
+            parent.kill()
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=30)
+
+    def test_open_flag_opens_the_ui_and_never_fails_the_engine(self):
+        import studio_server
+        from unittest import mock
+
+        self.assertTrue(studio_server.parse_args(["--open"]).open)
+        self.assertFalse(studio_server.parse_args([]).open)
+        with mock.patch("webbrowser.open") as opened:
+            studio_server.open_in_browser("http://localhost:7860/")
+        opened.assert_called_once_with("http://localhost:7860/")
+        with mock.patch("webbrowser.open", side_effect=RuntimeError("no browser")),                 self.assertLogs(level="WARNING") as logs:
+            studio_server.open_in_browser("http://localhost:7860/")  # logs, doesn't raise
+        self.assertIn("Open http://localhost:7860/ yourself", logs.output[0])
+
+    def test_wait_for_exit_returns_for_a_missing_process(self):
+        from src.studio.parent_watch import wait_for_exit
+
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait(timeout=30)
+        self.assertTrue(wait_for_exit(gone.pid, poll_s=0.05))
 
     def test_ready_line_means_reachable(self):
         proc = self._launch("--port", "0", "--log-level", "warning")
