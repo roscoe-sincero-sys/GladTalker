@@ -65,7 +65,7 @@ describe('desktop e2e teardown', () => {
     teardown.profile(root);
     // launchApp registers the app right after spawning it; then the DevTools connection fails.
     const launch = async () => {
-      teardown.app({ child });
+      teardown.app({ child }, root);
       throw new Error('Timed out waiting for the app’s WebView2 to accept a DevTools connection');
     };
     await expect(launch()).rejects.toThrow(/DevTools/);
@@ -81,7 +81,7 @@ describe('desktop e2e teardown', () => {
     const { teardown, stopped } = teardownFor(log);
     const { root, child } = await launchStandIn();
     teardown.profile(root);
-    teardown.app({ child });
+    teardown.app({ child }, root);
     expect(() => expect('a draft').toBe('another draft')).toThrow(); // the test fails before closing its app
 
     await teardown.run();
@@ -101,13 +101,67 @@ describe('desktop e2e teardown', () => {
     }
   });
 
-  it('keeps going if an app can’t be stopped, and says so', async () => {
+  it('keeps the profile of an app it couldn’t stop, says which, and still cleans up the others', async () => {
     const log = [];
-    const teardown = createTeardown({ stopApp: async () => { throw new Error('access denied'); }, log: (m) => log.push(m) });
-    const root = teardown.profile(fs.mkdtempSync(path.join(os.tmpdir(), 'gladtalker teardown-')));
-    teardown.app({});
+    const { root: stuck, child: stuckApp } = await launchStandIn();
+    const { root: done, child: doneApp } = await launchStandIn();
+    const teardown = createTeardown({
+      stopApp: async ({ child }) => {
+        if (child === stuckApp) throw new Error('access denied');
+        child.kill();
+        await waitUntil(() => exited(child));
+      },
+      log: (m) => log.push(m),
+    });
+    teardown.profile(stuck);
+    teardown.profile(done);
+    teardown.app({ child: stuckApp }, stuck);
+    teardown.app({ child: doneApp }, done);
+
     await teardown.run();
-    expect(log).toEqual(['Couldn’t stop a test app: access denied']);
-    expect(fs.existsSync(root)).toBe(false);
+    expect(fs.existsSync(path.join(stuck, 'webview2', 'Local State'))).toBe(true); // kept whole, not half deleted
+    expect(fs.existsSync(done)).toBe(false);
+    expect(log).toEqual([
+      'Couldn’t confirm a test app stopped: access denied',
+      `Kept the test profile ${path.resolve(stuck)}: an app using it may still be running (access denied). Delete it once that app has exited.`,
+    ]);
+    stuckApp.kill(); // this test's own cleanup of what teardown rightly kept
+    await waitUntil(() => exited(stuckApp));
+    fs.rmSync(stuck, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  });
+
+  it('keeps the profile when the app stopped but its engine can’t be confirmed gone', async () => {
+    const log = [];
+    const { root, child } = await launchStandIn();
+    const teardown = createTeardown({
+      stopApp: async (launched) => {
+        launched.child.kill();
+        await waitUntil(() => exited(launched.child));
+        throw new Error('Timed out waiting for the app’s engine to exit'); // what stopApp reports
+      },
+      log: (m) => log.push(m),
+    });
+    teardown.profile(root);
+    teardown.app({ child }, root);
+    await teardown.run();
+    expect(exited(child)).toBe(true);
+    expect(fs.existsSync(root)).toBe(true);
+    expect(log[1]).toMatch(/^Kept the test profile .*engine to exit/);
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  });
+
+  it('keeps a profile while any of the apps that used it is unconfirmed', async () => {
+    const log = [];
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gladtalker teardown-'));
+    const teardown = createTeardown({
+      stopApp: async ({ fails }) => { if (fails) throw new Error('still running'); },
+      log: (m) => log.push(m),
+    });
+    teardown.profile(root);
+    teardown.app({ fails: false }, root); // the first launch closed fine
+    teardown.app({ fails: true }, root); // a second launch with the same profile didn't
+    await teardown.run();
+    expect(fs.existsSync(root)).toBe(true);
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });

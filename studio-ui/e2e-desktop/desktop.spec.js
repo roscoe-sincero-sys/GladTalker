@@ -98,7 +98,7 @@ async function launchApp(profile) {
     stdio: 'ignore',
   });
   // Registered before anything can fail, so teardown closes it even if DevTools never attaches.
-  const launched = teardown.app({ app, browser: null, page: null });
+  const launched = teardown.app({ app, browser: null, page: null }, profile.root);
   const browser = await waitFor(async () => {
     try {
       return await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
@@ -125,7 +125,7 @@ const hasExited = (app) => app.exitCode !== null || app.signalCode !== null;
 
 /** Teardown's way to close an app: the normal way if it is still running, by force (with the
  * processes it started) if that doesn't work, then waits for its engine to exit too, since the
- * engine writes into the profile's workspace. */
+ * engine writes into the profile's workspace. Resolves only once both are confirmed gone. */
 async function stopApp(launched) {
   const { app, browser } = launched;
   if (!hasExited(app)) {
@@ -138,7 +138,9 @@ async function stopApp(launched) {
   } else if (browser) {
     await disconnect(browser);
   }
-  await waitFor(() => enginesOf(app.pid).length === 0, 60_000, 'the app’s engine to exit').catch(() => {});
+  // Throws if the engine can't be confirmed gone (still running, or the process list unreadable):
+  // teardown then keeps the profile rather than delete it under the engine.
+  await waitFor(() => enginesOf(app.pid).length === 0, 60_000, 'the app’s engine to exit');
 }
 
 const teardown = createTeardown({ stopApp });
