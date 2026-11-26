@@ -15,7 +15,6 @@ import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -40,24 +39,6 @@ class RetryLaterError(UserFacingError):
     def __init__(self, message: str, retry_after_s: int = 5):
         super().__init__(message)
         self.retry_after_s = retry_after_s
-
-
-@contextmanager
-def explain_load_failure(recheck: Callable[[], None]):
-    """Around code that loads model weights: if loading fails, ``recheck`` the files without the
-    digest cache. A file that became busy meanwhile (another program locked part of it, or it is
-    being replaced) raises RetryLaterError, and a damaged one raises its UserFacingError, instead of
-    an unexplained error. If the files are fine, the original error propagates unchanged."""
-    try:
-        yield
-    except (JobCancelled, UserFacingError):
-        raise
-    except Exception as exc:
-        try:
-            recheck()
-        except UserFacingError as found:  # includes RetryLaterError
-            raise found from exc
-        raise
 
 
 @dataclass

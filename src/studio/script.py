@@ -42,29 +42,46 @@ _EMPHASIS = ("**", "__", "*", "_")
 _BULLET_RE = re.compile(r"^\s*(?:[-*•>]\s+)?")
 # The end of a label: "<name> (note)" with an optional closing emphasis marker after the note.
 _NOTE_RE = re.compile(r"^(?P<label>.+?)\s*\((?P<note>[^()]{0,60})\)\s*(?P<close>\*\*|__|\*|_)?\s*$")
-_AFTER_COLON_RE = re.compile(r"^(?P<after>\*\*|__|\*|_)?\s*(?P<text>.*)$", re.DOTALL)
+# Room around a cast name in a label: emphasis markers, a "(note)" of up to 60 characters, and
+# spacing. A label is at most twice the longest cast name plus this, so the search for one never
+# depends on how long the dialogue after it is.
+_LABEL_SLACK = 80
 
 
-def _cast_line_readings(line: str) -> Iterator[tuple[str, tuple[str, ...], Optional[str], str]]:
-    """Every way ``line`` (bullet already removed) could start with a speaker label, as
-    ``(label, closing markers, note, text)``, longest label first, so a complete cast name that
-    contains a colon or parentheses ("Team: Blue", "Dr. Moss (Guest)") wins over a shorter one:
+def _cast_line_readings(line: str, max_label: int) -> Iterator[tuple[str, tuple[str, ...], Optional[str], Optional[int]]]:
+    """Every way ``line`` could start with a speaker label of at most ``max_label`` characters, as
+    ``(label, closing markers, note, colon index or None)``, longest label first, so a complete
+    cast name that contains a colon or parentheses ("Team: Blue", "Dr. Moss (Guest)") wins over a
+    shorter one:
 
-    1. the whole line, as a screenplay header (empty text), first as a name, then as
-       "name (note)";
-    2. at each colon from the last to the first: the part before it as a name, then as
-       "name (note)", with the rest of the line as the text."""
-    yield line, (), None, ""
-    if m := _NOTE_RE.match(line):
-        yield m.group("label"), (m.group("close"),), m.group("note"), ""
-    colons = [i for i, ch in enumerate(line) if ch == ":"]
-    for i in reversed(colons):
+    1. the whole line, as a screenplay header, first as a name, then as "name (note)";
+    2. at each colon within reach, from the last to the first: the part before it as a name, then
+       as "name (note)". The dialogue after the colon is left alone until a label wins."""
+    if len(line) <= max_label:
+        yield line, (), None, None
+        if m := _NOTE_RE.match(line):
+            yield m.group("label"), (m.group("close"),), m.group("note"), None
+    reach = line[:max_label + 1]
+    for i in range(len(reach) - 1, -1, -1):
+        if reach[i] != ":":
+            continue
         head = line[:i]
-        rest = _AFTER_COLON_RE.match(line[i + 1:])
-        after, text = rest.group("after"), rest.group("text").strip()
-        yield head, (after,), None, text
+        after = next((marker for marker in _EMPHASIS if line.startswith(marker, i + 1)), None)
+        yield head, (after,), None, i
         if m := _NOTE_RE.match(head):
-            yield m.group("label"), (m.group("close"), after), m.group("note"), text
+            yield m.group("label"), (m.group("close"), after), m.group("note"), i
+
+
+def _dialogue_after(line: str, colon: Optional[int]) -> str:
+    """The text after a winning label's colon, without a closing emphasis marker that follows it."""
+    if colon is None:
+        return ""
+    rest = line[colon + 1:]
+    for marker in _EMPHASIS:
+        if rest.startswith(marker):
+            rest = rest[len(marker):]
+            break
+    return rest.strip()
 
 
 def _label_candidates(label: str, closers: Iterable[str] = ()) -> list[str]:
@@ -187,9 +204,14 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
         canonical.setdefault(name_key(c), c)
     canonical_cast = set(canonical)  # keys of the cast itself (canonical also learns other names)
 
+    max_label = 2 * max((len(c) for c in cast_list), default=0) + _LABEL_SLACK
+
     def cast_member(label: str, closers: Iterable[str] = ()) -> Optional[str]:
         """The cast member a label names, compared with name_key (full Unicode case folding and
         any spacing, exactly as render matching does), or None."""
+        key = name_key(label)
+        if not any(k in key for k in canonical_cast):  # every reading of a label keeps the name inside
+            return None
         for candidate in _label_candidates(label, closers):
             if (key := name_key(candidate)) in canonical_cast:
                 return canonical[key]
@@ -218,11 +240,17 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
         # A cast member's label: "Name: text", "- **Name** (note): text", or a screenplay header
         # (just the name, optionally with a note or a colon) that sets the speaker, and the note,
         # for the following lines.
+        # The line as typed is tried first, so a cast name that starts like a list marker
+        # ("- Operator") is that cast member; only then is a leading bullet removed.
         reading = None
         if cast_list:
-            body = raw[_BULLET_RE.match(raw).end():].strip()
-            reading = next(((speaker, note, text) for label, closers, note, text in _cast_line_readings(body)
-                            if (speaker := cast_member(label, closers)) is not None), None)
+            bulleted = raw[_BULLET_RE.match(raw).end():].strip()
+            for body in dict.fromkeys((stripped, bulleted)):
+                reading = next(((speaker, note, _dialogue_after(body, colon))
+                                for label, closers, note, colon in _cast_line_readings(body, max_label)
+                                if (speaker := cast_member(label, closers)) is not None), None)
+                if reading is not None:
+                    break
         if reading is not None:
             speaker, note, body_text = reading
             note = note.strip() if note and note.strip() else None

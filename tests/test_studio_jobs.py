@@ -2,7 +2,6 @@ import asyncio
 import threading
 import time
 import unittest
-from unittest import mock
 
 from src.studio.jobs import JobCancelled, JobManager, UserFacingError
 
@@ -107,80 +106,6 @@ class JobManagerTests(unittest.TestCase):
         seqs = [e["seq"] for e in events]
         self.assertEqual(seqs, sorted(set(seqs)), "no duplicates, in order")
         self.assertIn("half", [e["job"]["message"] for e in events])
-
-
-class ExplainLoadFailureTests(unittest.TestCase):
-    def test_busy_or_damaged_files_explain_the_failure(self):
-        from src.studio.jobs import RetryLaterError, UserFacingError, explain_load_failure
-
-        for found in (RetryLaterError("busy, try again"), UserFacingError("damaged, repair")):
-            def recheck(found=found):
-                raise found
-
-            with self.assertRaises(type(found)) as caught:
-                with explain_load_failure(recheck):
-                    raise RuntimeError("PytorchStreamReader failed")
-            self.assertIs(caught.exception, found)
-            self.assertIsInstance(caught.exception.__cause__, RuntimeError)
-
-    def test_healthy_files_leave_the_original_error_and_cancellation_alone(self):
-        from src.studio.jobs import JobCancelled, explain_load_failure
-
-        recheck = mock.Mock()
-        with self.assertRaisesRegex(RuntimeError, "boom"):
-            with explain_load_failure(recheck):
-                raise RuntimeError("boom")
-        recheck.assert_called_once()
-        recheck.reset_mock()
-        with self.assertRaises(JobCancelled):
-            with explain_load_failure(recheck):
-                raise JobCancelled()
-        recheck.assert_not_called()
-
-
-class SadTalkerLoadGuardTests(unittest.TestCase):
-    """inference.main() wraps only its model loading in the caller's guard."""
-
-    def _args(self, tmp, guard):
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            source_image="face.png", driven_audio="line.wav", result_dir=tmp, pose_style=0, device="cpu",
-            batch_size=1, input_yaw=None, input_pitch=None, input_roll=None, ref_eyeblink=None, ref_pose=None,
-            checkpoint_dir="checkpoints", root_path=".", size=256, old_version=False, preprocess="full",
-            still=True, face3dvis=False, expression_scale=1.0, enhancer=None, background_enhancer=None,
-            verbose=False, model_load_guard=guard)
-
-    def _run(self, guard, **failures):
-        import tempfile
-
-        import inference
-
-        preprocess = mock.Mock()
-        preprocess.generate.return_value = ("coeff.mat", "crop.png", None)
-        animate = mock.Mock()
-        animate.generate.side_effect = failures.get("generate")
-        with tempfile.TemporaryDirectory() as tmp,                 mock.patch.object(inference, "init_path", return_value={}),                 mock.patch.object(inference, "CropAndExtract", side_effect=failures.get("load"), return_value=preprocess),                 mock.patch.object(inference, "Audio2Coeff"),                 mock.patch.object(inference, "AnimateFromCoeff", return_value=animate),                 mock.patch.object(inference, "get_data"), mock.patch.object(inference, "get_facerender_data"),                 mock.patch.object(inference.shutil, "move"), mock.patch.object(inference.shutil, "rmtree"):
-            return inference.main(self._args(tmp, guard))
-
-    def test_a_model_load_failure_is_explained_by_the_guard(self):
-        from src.studio.jobs import RetryLaterError, explain_load_failure
-
-        busy = RetryLaterError("A model is being updated. Try again in a moment.")
-        recheck = mock.Mock(side_effect=busy)
-        with self.assertRaises(RetryLaterError):
-            self._run(explain_load_failure(recheck), load=RuntimeError("PytorchStreamReader failed"))
-        recheck.assert_called_once()
-
-    def test_an_encoder_failure_after_loading_keeps_its_own_message(self):
-        """Even while a checkpoint happens to be busy, a failure after the models loaded (here the
-        mux running out of disk) is reported as itself."""
-        from src.studio.jobs import RetryLaterError, explain_load_failure
-
-        recheck = mock.Mock(side_effect=RetryLaterError("A model is being updated."))
-        with self.assertRaisesRegex(RuntimeError, "No space left on device"):
-            self._run(explain_load_failure(recheck), generate=RuntimeError("ffmpeg: No space left on device"))
-        recheck.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -162,6 +162,44 @@ class ParseScriptTests(unittest.TestCase):
         self.assertEqual(parsed.unknown_speakers, [])
         self.assertEqual(self._render_speakers(cast, parsed), expected)
 
+    def test_a_cast_name_that_looks_like_a_list_marker_is_tried_as_typed_first(self):
+        cast = ["Operator", "- Operator", "Brain"]
+        parsed = parse_script("- Operator\nCome in.\n\n- Operator: Over.\n- **Brain:** Bulleted.\n"
+                              "* Operator: Also bulleted.\nOperator: Plain.", cast=cast)
+        expected = [("- Operator", "Come in."), ("- Operator", "Over."), ("Brain", "Bulleted."),
+                    ("Operator", "Also bulleted."), ("Operator", "Plain.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_finding_a_label_never_depends_on_how_long_the_dialogue_is(self):
+        """Colons in the dialogue (clock times) aren't examined beyond the longest possible label,
+        and the dialogue is sliced once, after the label is chosen."""
+        from unittest import mock
+
+        from src.studio import script
+
+        cast = ["Dr. Moss", "Dr. Moss (Guest)"]
+        times = ", ".join(f"{h}:{m:02d}" for h in range(1, 13) for m in (0, 15, 30, 45))
+        processed = []
+        real_key = script.name_key
+
+        def counting_key(name):
+            processed.append(len(name))
+            return real_key(name)
+
+        work = {}
+        for repeat in (1, 40):
+            processed.clear()
+            line = f"Dr. Moss (Guest): Meet me at {times}." * repeat
+            with mock.patch.object(script, "name_key", counting_key):
+                parsed = parse_script(line, cast=cast)
+            self.assertEqual(parsed.lines[0].speaker, "Dr. Moss (Guest)")
+            self.assertTrue(parsed.lines[0].text.startswith("Meet me at 1:00"))
+            work[len(line)] = sum(processed)
+        short, long = work.values()
+        self.assertEqual(long, short, work)  # a 40x longer line costs nothing more to label
+        self.assertLess(short, 3_000, work)  # about 20 colons within reach of a 16-character name
+
     def test_a_headers_note_goes_with_the_line_after_it(self):
         parsed = parse_script("Mia (quietly):\nShh.\n\nOut loud now.\n\n**Mia** (whispering)\nPsst.", cast=["Mia"])
         self.assertEqual([(l.speaker, l.note, l.text) for l in parsed.lines], [

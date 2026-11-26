@@ -17,7 +17,6 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -28,7 +27,8 @@ from src.studio import REPO_ROOT
 from src.studio.audio import FPS, DialogueTooLongError, TTSService, build_dialogue_audio
 from src.studio.captions import to_srt, to_vtt
 from src.studio.ffmpeg import NO_WINDOW, FFmpegError, require_ffmpeg
-from src.studio.jobs import JobCancelled, JobContext, RetryLaterError, UserFacingError, explain_load_failure
+from src.studio.jobs import JobCancelled, JobContext, RetryLaterError, UserFacingError
+from src.studio.model_reads import explain_checkpoint_reads
 from src.studio.schemas import OUTPUT_PRESETS, OutputSettings, RenderRequest
 
 MIN_REGION_PX = 32
@@ -237,8 +237,7 @@ def validate_request(req: RenderRequest, image: np.ndarray) -> None:
             )
 
 
-def check_models(root: Path = REPO_ROOT, quality_mode: str = "standard", size: int = 256,
-                 use_cache: bool = True) -> None:
+def check_models(root: Path = REPO_ROOT, quality_mode: str = "standard", size: int = 256) -> None:
     ckpt = root / "checkpoints"
     needed = [ckpt / f"SadTalker_V0.0.2_{size}.safetensors", *(ckpt / n for n in REQUIRED_CHECKPOINTS)]
     weights = root / "gfpgan" / "weights"
@@ -247,8 +246,7 @@ def check_models(root: Path = REPO_ROOT, quality_mode: str = "standard", size: i
         needed += [weights / "GFPGANv1.4.pth", weights / "parsing_parsenet.pth"]
     from scripts.download_models import BUSY, MISSING, READY, expected_for, verification_state
 
-    states = {p.name: verification_state(p, expected_for(p.relative_to(root).as_posix()), use_cache=use_cache)
-              for p in needed}
+    states = {p.name: verification_state(p, expected_for(p.relative_to(root).as_posix())) for p in needed}
     missing = [n for n, s in states.items() if s == MISSING]
     busy = [n for n, s in states.items() if s == BUSY]
     broken = [n for n, s in states.items() if s not in (MISSING, BUSY, READY)]
@@ -421,11 +419,10 @@ def render(ctx: JobContext, req: RenderRequest, out_dir: Path, tts: TTSService, 
 
             t_r = time.perf_counter()
             args = _sadtalker_args(tile_path, audio.speaker_wavs[name], str(work_dir / f"{safe}_sadtalker"), device, req)
-            # Only SadTalker's model loading is explained by rechecking the checkpoints; encoder,
-            # disk and other later failures keep their own messages.
-            args.model_load_guard = explain_load_failure(
-                partial(check_models, quality_mode=req.quality.mode, size=req.quality.size, use_cache=False))
-            with report_progress(hook), retinaface_fallback():
+            # A failed read of a model file (including GFPGAN's, loaded later in Enhanced mode) is
+            # explained when that file is busy or damaged; out-of-memory, encoder and disk failures
+            # keep their own messages.
+            with explain_checkpoint_reads(), report_progress(hook), retinaface_fallback():
                 video = inference.main(args)
             if not video or not os.path.isfile(video):
                 raise UserFacingError(

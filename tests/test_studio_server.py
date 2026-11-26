@@ -500,15 +500,41 @@ class StudioServerTests(unittest.TestCase):
         root = self._install_models()
         path = root / self.DETECTOR_REL
         with contextlib.ExitStack() as held:
-            def load(*args, **kwargs):
+            def load(*args, **kwargs):  # facexlib's loader: reads the weights with torch.load
+                import torch
+
                 held.enter_context(range_lock(path, offset=0, length=path.stat().st_size))
-                raise RuntimeError("PytorchStreamReader failed reading file")
+                return torch.load(str(path), map_location="cpu", weights_only=True)
 
             with mock.patch("facexlib.detection.init_detection_model", side_effect=load):
                 r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
         self.assertEqual(r.status_code, 503, r.text)
         self.assertTrue(r.json()["retryable"])
-        self.assertIn("Try Auto-Cast again in a moment", r.json()["detail"])
+        self.assertIn("detection_Resnet50_Final.pth is being updated", r.json()["detail"])
+
+    def test_detector_out_of_memory_is_not_disguised_by_a_busy_checkpoint(self):
+        """Running out of memory while the detector moves to its device isn't a model read, so it
+        isn't turned into retry advice even if a model file happens to be busy then."""
+        import torch
+
+        from scripts import download_models as dm
+
+        self._install_models()
+        oom = torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+        with mock.patch("facexlib.detection.init_detection_model", side_effect=oom):
+            real_state = dm.verification_state
+            calls = []
+
+            def state(dest, expected, **kw):  # the pre-load check passes; any later check finds it busy
+                calls.append(dest)
+                return real_state(dest, expected, **kw) if len(calls) == 1 else dm.BUSY
+
+            with mock.patch.object(dm, "verification_state", state):
+                client = TestClient(create_app(self.config, self.services), raise_server_exceptions=False)
+                r = client.post("/cast/detect", json={"image_path": str(self.image)})
+                client.close()
+        self.assertEqual(r.status_code, 500)
+        self.assertEqual(len(calls), 1)  # nothing was rehashed after the failure
 
     def test_load_failure_with_healthy_weights_is_not_disguised(self):
         self._install_models()
