@@ -187,17 +187,23 @@ class FaceDetectorService:
         self._net = None
         self._lock = threading.Lock()
 
+    def model_file(self) -> tuple[Path, tuple[int, str]]:
+        """The RetinaFace weights in this service's model folder, and the pin they must match."""
+        from scripts.download_models import expected_for
+
+        return Path(self.model_root) / DETECTOR_WEIGHTS, expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}")
+
     def check_model(self) -> None:
         """Verify the RetinaFace weights against their pinned size and SHA-256 before facexlib
         touches them: facexlib would silently use a damaged file, or download a missing one with
         no checksum. Only this one file is required, so casting works before render models are
         installed."""
-        from scripts.download_models import BUSY, MISSING, READY, expected_for, verification_state
+        from scripts.download_models import BUSY, MISSING, READY, verification_state
 
         from src.studio.jobs import RetryLaterError, UserFacingError
 
-        path = Path(self.model_root) / DETECTOR_WEIGHTS
-        state = verification_state(path, expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}"))
+        path, expected = self.model_file()
+        state = verification_state(path, expected)
         if state == MISSING:
             raise UserFacingError(
                 f"The face-detection model ({DETECTOR_WEIGHTS}) isn't downloaded yet. "
@@ -222,8 +228,9 @@ class FaceDetectorService:
 
             self.check_model()
             # A lock taken after the check above still gets retry advice rather than a bare error,
-            # but only a failed read of the weights is explained that way.
-            with explain_checkpoint_reads(root=Path(self.model_root).parent.parent):
+            # but only a failed read of the very file (and pin) the check just verified.
+            path, expected = self.model_file()
+            with explain_checkpoint_reads(files={path: expected}):
                 self._net = init_detection_model(
                     "retinaface_resnet50", half=False, device=self.device, model_rootpath=self.model_root
                 )

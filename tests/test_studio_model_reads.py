@@ -126,6 +126,19 @@ class ExplainCheckpointReadsTests(unittest.TestCase):
             with self.assertRaisesRegex(UserFacingError, "is damaged"):
                 torch.load(str(on_disk), weights_only=True)
 
+    def test_explicit_files_are_covered_wherever_they_are_and_nothing_else(self):
+        elsewhere = self.root / "somewhere" / "else.pth"
+        elsewhere.parent.mkdir()
+        elsewhere.write_bytes(b"X" + self.data[1:])
+        pin = (len(self.data), hashlib.sha256(self.data).hexdigest())
+        self.path(self.GFPGAN).write_bytes(b"X" + self.data[1:])
+        with explain_checkpoint_reads(files={elsewhere: pin}):
+            with self.assertRaisesRegex(UserFacingError, "else.pth is damaged"):
+                torch.load(str(elsewhere), weights_only=True)
+            with self.assertRaises(Exception) as other:  # a pinned file, but not one this block covers
+                torch.load(str(self.path(self.GFPGAN)), weights_only=True)
+            self.assertNotIsInstance(other.exception, UserFacingError)
+
     def test_out_of_memory_with_an_unrelated_locked_checkpoint_keeps_its_message(self):
         """Moving a model to the device isn't a model read: its failure propagates as itself and
         nothing is rehashed, even while another checkpoint is busy."""

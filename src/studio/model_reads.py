@@ -27,7 +27,7 @@ from typing import Optional
 from src.studio import REPO_ROOT
 from src.studio.jobs import RetryLaterError, UserFacingError
 
-_active = threading.local()  # .roots: model roots of the explain_checkpoint_reads() blocks on this thread
+_active = threading.local()  # .scopes: what each explain_checkpoint_reads() block on this thread covers
 _install_lock = threading.Lock()
 _installed = False
 
@@ -44,25 +44,35 @@ def _same_path(a: Path, b: Path) -> bool:
         return False
 
 
-def _pin_for(target: Path, root: Path) -> Optional[tuple[int, str]]:
-    """The pin of the model file under ``root`` that ``target`` names (however it is spelled), or
-    None if it isn't one of the pinned model files."""
-    from scripts.download_models import MODEL_CHECKSUMS
+def _pin_under_root(root: Path):
+    """A scope covering every pinned model file under ``root``, however its path is spelled."""
+    def pin_for(target: Path) -> Optional[tuple[int, str]]:
+        from scripts.download_models import MODEL_CHECKSUMS
 
-    for rel, expected in MODEL_CHECKSUMS.items():
-        if _same_path(target, root / rel):
-            return expected
-    return None
+        for rel, expected in MODEL_CHECKSUMS.items():
+            if _same_path(target, root / rel):
+                return expected
+        return None
+
+    return pin_for
+
+
+def _pin_of_files(files: dict):
+    """A scope covering exactly these files, each with the pin it was checked against."""
+    def pin_for(target: Path) -> Optional[tuple[int, str]]:
+        return next((expected for path, expected in files.items() if _same_path(target, Path(path))), None)
+
+    return pin_for
 
 
 def _explain(path, exc: BaseException) -> None:
-    """Raise RetryLaterError or UserFacingError for a failed read of a pinned model file under one
-    of this thread's roots; return quietly if the file is healthy or isn't a model file."""
+    """Raise RetryLaterError or UserFacingError for a failed read of a model file covered by one of
+    this thread's blocks; return quietly if the file is healthy or isn't covered."""
     from scripts.download_models import BUSY, MISSING, READY, verification_state
 
     target = Path(os.fspath(path))
-    for root in reversed(getattr(_active, "roots", [])):
-        expected = _pin_for(target, Path(root))
+    for pin_for in reversed(getattr(_active, "scopes", [])):
+        expected = pin_for(target)
         if expected is None:
             continue
         state = verification_state(target, expected, use_cache=False)
@@ -87,7 +97,7 @@ def _explained(read, path_param: str):
         try:
             return read(*args, **kwargs)
         except Exception as exc:
-            if getattr(_active, "roots", None):
+            if getattr(_active, "scopes", None):
                 source = args[0] if args else kwargs.get(path_param)
                 if isinstance(source, (str, os.PathLike)):
                     _explain(source, exc)
@@ -114,15 +124,17 @@ def _install() -> None:
 
 
 @contextmanager
-def explain_checkpoint_reads(root: Optional[Path] = None):
-    """Within this block (on this thread), a failed read of a pinned model file under ``root``
-    (default: the repository) is explained as busy or damaged when it is; see the module docs."""
+def explain_checkpoint_reads(root: Optional[Path] = None, files: Optional[dict] = None):
+    """Within this block (on this thread), a failed read of a covered model file is explained as
+    busy or damaged when it is; see the module docs. ``files`` ({path: (size, sha256)}) covers
+    exactly those files with those pins, e.g. the ones a precheck just verified, wherever they are;
+    otherwise every pinned model file under ``root`` (default: the repository) is covered."""
     _install()
-    roots = getattr(_active, "roots", None)
-    if roots is None:
-        roots = _active.roots = []
-    roots.append(Path(root or REPO_ROOT))
+    scopes = getattr(_active, "scopes", None)
+    if scopes is None:
+        scopes = _active.scopes = []
+    scopes.append(_pin_of_files(files) if files is not None else _pin_under_root(Path(root or REPO_ROOT)))
     try:
         yield
     finally:
-        roots.pop()
+        scopes.pop()

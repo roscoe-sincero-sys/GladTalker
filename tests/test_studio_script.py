@@ -212,6 +212,33 @@ class ParseScriptTests(unittest.TestCase):
         self.assertEqual(parsed.lines[0].note, "calmly")
         self.assertEqual(self._render_speakers(cast, parsed), expected)
 
+    def test_long_cast_names_that_dont_fit_cost_nothing_per_line(self):
+        """The label search follows only cast names that still match the text, so a long cast entry
+        (unrelated, or sharing the speaker's first words) adds no work to each line."""
+        from unittest import mock
+
+        from src.studio import script
+
+        times = ", ".join(f"{h}:{m:02d}" for h in range(1, 13) for m in (0, 15, 30, 45))
+        line = f"Dr. Moss (Guest): Meet me at {times}."
+        real_key = script.name_key
+
+        def per_line_work(cast):
+            totals = []
+            for count in (1, 20):
+                processed = []
+                with mock.patch.object(script, "name_key", lambda name: (processed.append(len(name)), real_key(name))[1]):
+                    parsed = parse_script("\n".join([line] * count), cast=cast)
+                self.assertEqual({l.speaker for l in parsed.lines}, {"Dr. Moss (Guest)"})
+                totals.append(sum(processed))
+            return (totals[1] - totals[0]) / 19
+
+        short = ["Dr. Moss", "Dr. Moss (Guest)"]
+        baseline = per_line_work(short)
+        self.assertLess(baseline, 3_000)
+        for extra in ("Narrator" * 1_500, "Dr. Moss " + "the Elder " * 1_000):
+            self.assertEqual(per_line_work(short + [extra]), baseline, len(extra))
+
     def test_a_huge_run_of_spaces_is_read_once(self):
         from unittest import mock
 
