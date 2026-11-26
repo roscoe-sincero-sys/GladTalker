@@ -78,7 +78,7 @@
       fileError = err.message;
       announceError(err.message);
     } finally {
-      sceneUpload.busy = false;
+      if (current()) sceneUpload.busy = false; // after New/Open the flag is the new project's
     }
   }
 

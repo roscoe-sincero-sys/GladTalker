@@ -119,7 +119,9 @@ export function projectGuard() {
 
 // The scene upload in flight. It belongs to the project, not to a Cast view: leaving Cast and
 // coming back mounts a new view, which must still see the earlier upload as busy, so a second
-// upload can't be accepted and then overwritten when the earlier answer arrives.
+// upload can't be accepted and then overwritten when the earlier answer arrives. Replacing the
+// project (New, Open) frees it: the old upload's answer is dropped by its projectGuard, and it
+// only clears the flag while its project is still the current one.
 export const sceneUpload = $state({ busy: false });
 
 /** Replace the whole project in place (keeps the reactive object identity). */
@@ -140,6 +142,7 @@ export function hasWork(p) {
 export function replaceProject(next) {
   const normalized = normalizeProject(next);
   generation++;
+  sceneUpload.busy = false; // an upload still pending belongs to the project being replaced
   for (const key of Object.keys(project)) delete project[key];
   Object.assign(project, normalized);
 }

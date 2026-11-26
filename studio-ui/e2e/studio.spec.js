@@ -424,6 +424,46 @@ test('leaving Cast and coming back during an upload still turns a second image a
   await expect.poll(async () => (await savedProject(page)).image.name).toBe('art_0.png');
 });
 
+test('a new project isn’t held up by the previous project’s pending upload, and its answer can’t touch the new one', async ({ page }) => {
+  await openStudio(page);
+  // One route holds every upload until released, in order. (Two one-shot holds on the same URL
+  // interfere in Playwright: releasing the first also lets the second through.)
+  const held = [];
+  await page.route('**/uploads', async (route) => {
+    let release;
+    held.push(new Promise((r) => (release = r)).then(() => route.continue()));
+    held[held.length - 1].release = release;
+  });
+  const nthUpload = async (n) => {
+    await expect.poll(() => held.length).toBeGreaterThanOrEqual(n);
+    return held[n - 1].release;
+  };
+
+  await page.getByLabel('Scene image').setInputFiles(PORTRAIT); // project A's scene, held
+  const releaseA = await nthUpload(1);
+  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: /Script/ }).click();
+  await page.getByRole('button', { name: 'New', exact: true }).click(); // project B (back on Cast)
+  await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
+  await expect(page.getByText('Uploading…')).toHaveCount(0); // A's upload isn't B's
+
+  await page.getByLabel('Scene image').setInputFiles(SECOND_SCENE); // accepted at once
+  const releaseB = await nthUpload(2);
+  await expect(page.getByText('Uploading…')).toBeVisible();
+
+  releaseA(); // A's answer: dropped, and it doesn't free B's upload
+  await page.waitForTimeout(500);
+  await expect(page.getByText('Uploading…')).toBeVisible();
+  expect((await savedProject(page)).image).toBeNull();
+  await page.getByLabel('Scene image').setInputFiles(PORTRAIT); // still one upload at a time in B
+  await expect(page.locator('[role="status"][aria-live="polite"]').last()).toHaveText(/Still uploading the previous image/);
+  expect(held).toHaveLength(2);
+
+  releaseB();
+  await expect(page.getByRole('img', { name: /Scene: art_0\.png/ })).toBeVisible();
+  await expect(page.getByText('Uploading…')).toHaveCount(0);
+  await expect.poll(async () => (await savedProject(page)).image?.name).toBe('art_0.png');
+});
+
 test('a second image dropped while one is uploading is turned away, so an older upload can’t replace a newer scene', async ({ page }) => {
   await openStudio(page);
   const uploads = [];
