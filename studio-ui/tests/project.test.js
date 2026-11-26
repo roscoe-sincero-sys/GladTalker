@@ -90,6 +90,14 @@ describe('render checklist (WCAG 3.3.1 / 3.3.3)', () => {
     expect(problemsForStep(problems, 'script')).toHaveLength(2);
     expect(problems.find((x) => x.fieldId === 'name-c2').message).toMatch(/used by two cast members/);
   });
+  it('says to wait, not to download, when the only outstanding models are busy', () => {
+    const busyOnly = { complete: false, busy: 1, files: [{ ready: true }, { ready: false, busy: true }] };
+    const [busy] = renderProblems(sample(), { models: busyOnly, ffmpeg: true });
+    expect(busy.message).toMatch(/in use by another program/);
+    expect(busy.message).not.toMatch(/Download Models/);
+    const mixed = { complete: false, busy: 1, files: [{ ready: false }, { ready: false, busy: true }] };
+    expect(renderProblems(sample(), { models: mixed, ffmpeg: true })[0].message).toMatch(/Choose Download Models/);
+  });
   it('asks for an image, cast, and script when starting from scratch', () => {
     expect(renderProblems(defaultProject()).map((x) => x.fieldId)).toEqual(['scene-file', 'auto-cast', 'script-import']);
   });

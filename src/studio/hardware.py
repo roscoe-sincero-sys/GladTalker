@@ -151,21 +151,33 @@ def models_status(root: Path = REPO_ROOT) -> dict:
 
 
 def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False) -> dict:
-    """Job body: fetch every missing model file, reporting per-file byte progress."""
-    from scripts.download_models import READY, DownloadIntegrityError, download_file, expected_for, verification_state
+    """Job body: fetch every missing, incomplete or damaged model file (``force``: every file),
+    reporting per-file byte progress. A file that is busy (being replaced, or locked by another
+    program) is not something to repair: it is skipped, rechecked just before its turn and again
+    if its download fails, and reported in ``deferred`` while the rest of the queue proceeds."""
+    from scripts.download_models import (BUSY, READY, DownloadIntegrityError, download_file, expected_for,
+                                         verification_state)
+
+    def state_of(rel: str) -> str:
+        return verification_state(Path(root) / rel, expected_for(rel))
 
     manifest = model_manifest()
-    todo = [(rel, url) for rel, url in manifest
-            if force or verification_state(Path(root) / rel, expected_for(rel)) != READY]
+    states = {} if force else {rel: state_of(rel) for rel, _ in manifest}
+    todo = [(rel, url) for rel, url in manifest if states.get(rel) not in (READY, BUSY)]
+    deferred = [rel for rel, _ in manifest if states.get(rel) == BUSY]
     ctx.set_stages([Path(rel).name for rel, _ in todo] or ["check"])
-    if not todo:
-        ctx.progress(1.0, "All models are already downloaded.", stage="check")
-        return {"downloaded": [], "status": models_status(root)}
 
     downloaded = []
     for i, (rel, url) in enumerate(todo):
         name = Path(rel).name
         last = [0.0]
+        state = state_of(rel)
+        if state == BUSY:
+            deferred.append(rel)
+            ctx.log(f"Skipped {rel}: it is being updated or in use by another program")
+            continue
+        if state == READY and not force:
+            continue  # another writer finished it meanwhile
 
         def on_chunk(done: int, total: Optional[int], i=i, name=name, last=last) -> None:
             now = time.monotonic()
@@ -183,7 +195,11 @@ def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False
             download_file(url, Path(root) / rel, force=force, progress=on_chunk, expected=expected_for(rel))
         except DownloadIntegrityError as exc:
             raise UserFacingError(str(exc)) from exc
-        except OSError as exc:  # URLError, timeouts, disk full...
+        except OSError as exc:  # URLError, timeouts, disk full... or the file became busy
+            if state_of(rel) == BUSY:
+                deferred.append(rel)
+                ctx.log(f"Skipped {rel}: it became busy while it was being replaced")
+                continue
             reason = getattr(exc, "reason", None) or exc.strerror or exc
             raise UserFacingError(
                 f"Couldn't download {name}: {reason}. Check your internet connection and free disk "
@@ -192,4 +208,14 @@ def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False
         downloaded.append(rel)
         ctx.log(f"Downloaded {rel}")
 
-    return {"downloaded": downloaded, "status": models_status(root)}
+    status = models_status(root)
+    if status["complete"]:
+        message = "All models are downloaded and verified."
+    elif deferred:
+        names = ", ".join(Path(rel).name for rel in deferred)
+        message = (f"Some models are being updated or are in use by another program, so they were "
+                   f"left alone: {names}. GladTalker will check them again.")
+    else:
+        message = "Some models still need downloading. Choose Download Models again."
+    ctx.progress(1.0, message)
+    return {"downloaded": downloaded, "deferred": deferred, "status": status, "message": message}

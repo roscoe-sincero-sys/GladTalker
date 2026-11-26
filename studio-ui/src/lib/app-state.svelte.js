@@ -79,6 +79,38 @@ export async function refreshModels() {
   }
 }
 
+/** While the last known model status has busy files (being replaced, or locked by another
+ * program), check it again every `delayMs`, one request at a time, until none is busy or `stop()`
+ * is called. A failed check keeps the last known state and is simply tried again. `poke()` starts
+ * polling again after the status changes (it does nothing while a check is already pending). */
+export function pollBusyModels({ delayMs = 3000 } = {}) {
+  let timer = null;
+  let inFlight = false;
+  let stopped = false;
+  const schedule = () => {
+    if (stopped || timer || inFlight || !engine.models?.busy) return;
+    timer = setTimeout(async () => {
+      timer = null;
+      inFlight = true;
+      try {
+        await refreshModels();
+      } finally {
+        inFlight = false;
+      }
+      schedule();
+    }, delayMs);
+  };
+  schedule();
+  return {
+    poke: schedule,
+    stop() {
+      stopped = true;
+      clearTimeout(timer);
+      timer = null;
+    },
+  };
+}
+
 /** Go to a step and move focus to its heading (so screen reader users hear where they are), or
  * to a specific field when fixing a problem from the checklist. */
 export async function goTo(step, fieldId = null) {

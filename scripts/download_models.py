@@ -181,14 +181,22 @@ def hash_snapshot(dest: Path, attempts: int = 3) -> tuple[str, os.stat_result]:
     raise FileChangedError(f"{dest.name} kept changing while it was being verified; try again.")
 
 
+def _cached_digest(dest: Path, st: os.stat_result) -> Optional[str]:
+    """The cached SHA-256 for the exact file ``st`` describes (size, mtime and file ID), if it
+    was hashed comfortably after its last modification; otherwise None."""
+    entry = _load_cache(Path(dest).parent).get(Path(dest).name)
+    if (entry and (entry.get("size"), entry.get("mtime_ns"), entry.get("ino")) == _identity(st)
+            and st.st_mtime_ns < entry.get("verified_at_ns", 0) - RACY_WINDOW_NS):
+        return entry["sha256"]
+    return None
+
+
 def file_digest(dest: Path, use_cache: bool = True) -> str:
     dest = Path(dest)
     if use_cache:
-        st = dest.stat()
-        entry = _load_cache(dest.parent).get(dest.name)
-        if (entry and (entry.get("size"), entry.get("mtime_ns"), entry.get("ino")) == _identity(st)
-                and st.st_mtime_ns < entry.get("verified_at_ns", 0) - RACY_WINDOW_NS):
-            return entry["sha256"]
+        cached = _cached_digest(dest, dest.stat())
+        if cached is not None:
+            return cached
     digest, snapshot = hash_snapshot(dest)
     _record_digest(dest, digest, snapshot)
     return digest
@@ -207,21 +215,55 @@ def is_verified(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool
 MISSING, INCOMPLETE, READY, DAMAGED, BUSY = "missing", "incomplete", "ready", "damaged", "busy"
 
 
-def verification_state(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool = True) -> str:
-    """Classify ``dest`` without raising: ``missing``; ``incomplete`` (wrong size); ``ready``
-    (pinned size and SHA-256); ``damaged`` (a completed check found a checksum mismatch); or
-    ``busy`` when the check couldn't finish because the file kept changing, was locked by another
-    program, or vanished mid-check (it is being replaced). ``busy`` is temporary: check again
-    shortly rather than repairing."""
+def verification_state(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool = True,
+                       attempts: int = 3) -> str:
+    """Classify ``dest`` without raising, from one stable snapshot of one open file:
+
+    * ``missing``: nothing is there;
+    * ``incomplete``: the file has the wrong size;
+    * ``ready``: the file can be read and has the pinned size and SHA-256 (no pin: it can be read);
+    * ``damaged``: a completed check of an unchanging file found a checksum mismatch;
+    * ``busy``: the check couldn't finish because the file kept changing or being replaced, was
+      locked by another program, or disappeared after it was seen. This is temporary: check
+      again shortly rather than repairing.
+
+    The size, the cache lookup and the digest all come from the same open handle, and the result
+    only counts if the path still names that file afterwards; otherwise it is retried. Even a
+    cached digest needs the file to open and read, so a locked file is never reported ready."""
     dest = Path(dest)
-    try:
-        if not dest.is_file():
-            return MISSING
-        if not is_complete(dest, expected):
-            return INCOMPLETE
-        return READY if is_verified(dest, expected, use_cache=use_cache) else DAMAGED
-    except OSError:  # FileChangedError, a sharing violation, or the file disappearing
-        return BUSY
+    for attempt in range(attempts):
+        cached = None
+        try:
+            f = open(dest, "rb")
+        except FileNotFoundError:
+            return MISSING if attempt == 0 else BUSY  # it was there a moment ago: being replaced
+        except OSError:
+            if dest.is_dir():  # Windows reports opening a folder as "access denied"
+                return MISSING
+            return BUSY  # sharing violation or other lock
+        try:
+            with f:
+                before = os.fstat(f.fileno())
+                if expected is not None and before.st_size != expected[0]:
+                    state, digest, after = INCOMPLETE, None, before
+                else:
+                    if use_cache and expected is not None:
+                        cached = _cached_digest(dest, before)
+                    if cached is not None or expected is None:
+                        f.read(1)  # still readable: not locked by another program
+                        digest, after = cached, before
+                    else:
+                        digest = _hash_open_file(f)
+                        after = os.fstat(f.fileno())
+                    state = READY if expected is None or digest == expected[1] else DAMAGED
+            current = os.stat(dest)
+        except OSError:  # a lock on the contents, or the path vanished after reading
+            continue
+        if _identity(before) == _identity(after) == _identity(current):
+            if digest is not None and cached is None:
+                _record_digest(dest, digest, before)
+            return state
+    return BUSY
 
 
 def _verified_quietly(dest: Path, expected: tuple[int, str]) -> bool:

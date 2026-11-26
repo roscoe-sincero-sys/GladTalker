@@ -39,32 +39,36 @@ _HAS_LETTER_RE = re.compile(r"[^\W\d_]")
 
 
 _EMPH = r"(?:\*\*|__|\*|_)?"
+# Lazy: try the line *without* an opening emphasis marker first, so a cast name that starts with
+# an underscore ("_Crew") wins over a shorter name wrapped in emphasis ("Crew").
+_OPEN_EMPH = r"(?:\*\*|__|\*|_)??"
 
 
-def _known_speaker_res(cast: list[str]) -> tuple[Optional[re.Pattern], Optional[re.Pattern]]:
-    """Patterns for lines that name a cast member (any length, any case, flexible spacing).
-
-    The first has the same shape as _SPEAKER_LINE_RE but the name must be one of the cast; it is
-    tried first so long names like "The Man in the Hat" are recognised instead of being folded
-    into the previous speaker's line. The second matches a line that is only a cast name
-    (screenplay style, optionally emphasised and/or followed by a colon). Longest names win, and
-    a name's own underscores (``Crew_``) are kept rather than read as Markdown emphasis."""
+def _known_speaker_re(cast: list[str]) -> Optional[re.Pattern]:
+    """Same shape as _SPEAKER_LINE_RE, but the name must be one of the cast (any length, any
+    case, flexible spacing). Tried first so long names like "The Man in the Hat" are recognised
+    instead of being folded into the previous speaker's line. Longest names win, and a name's own
+    underscores ("Crew_", "_Crew") are kept rather than read as Markdown emphasis."""
     if not cast:
-        return None, None
+        return None
     names = sorted({c for c in cast if c.strip()}, key=len, reverse=True)
     alternatives = "|".join(r"\s+".join(re.escape(part) for part in n.split()) for n in names)
-    speaker_re = re.compile(
-        rf"^\s*(?:[-*•>]\s+)?{_EMPH}\s*"
+    return re.compile(
+        rf"^\s*(?:[-*•>]\s+)?{_OPEN_EMPH}\s*"
         rf"(?P<name>{alternatives})"
         rf"\s*{_EMPH}\s*(?:\((?P<note>[^)]{{0,60}})\))?\s*{_EMPH}\s*:{_EMPH}"
         r"\s*(?P<text>.*)$",
         re.IGNORECASE,
     )
-    bare_re = re.compile(
-        rf"^\s*{_EMPH}\s*(?P<name>{alternatives})\s*{_EMPH}\s*:?\s*{_EMPH}\s*$",
-        re.IGNORECASE,
-    )
-    return speaker_re, bare_re
+
+
+def _header_candidates(line: str) -> list[str]:
+    """Ways to read a screenplay header line ("BRAIN", "**Crew_:**") as a bare name, most literal
+    first: as typed, then without asterisks, then without any emphasis markers."""
+    literal = line.strip().rstrip(":").strip()
+    no_stars = literal.strip("* ").rstrip(":").strip("* ")
+    bare = literal.strip("*_ ").rstrip(":").strip("*_ ")
+    return list(dict.fromkeys(c for c in (literal, no_stars, bare) if c))
 
 
 @dataclass
@@ -160,7 +164,8 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     canonical: dict[str, str] = {}
     for c in cast_list:
         canonical.setdefault(name_key(c), c)
-    known_re, known_bare_re = _known_speaker_res(cast_list)
+    canonical_cast = set(canonical)  # keys of the cast itself (canonical also learns other names)
+    known_re = _known_speaker_re(cast_list)
 
     lines: list[ParsedLine] = []
     pending_speaker: Optional[str] = None
@@ -183,9 +188,11 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             continue
 
         # Screenplay style: a line that is just a known cast name (optionally with a colon).
-        bare = known_bare_re.match(raw) if known_bare_re else None
-        if bare:
-            pending_speaker, pending_note, current = canon(bare.group("name")), None, None
+        # Compared with name_key (full Unicode case folding, so "STRASSE" is "Straße"), trying the
+        # literal label before stripping emphasis, so "_Crew" stays "_Crew" when it is in the cast.
+        header = next((c for c in _header_candidates(stripped) if name_key(c) in canonical_cast), None)
+        if header is not None:
+            pending_speaker, pending_note, current = canonical[name_key(header)], None, None
             continue
 
         m = (known_re.match(raw) if known_re else None) or _match_speaker_line(raw)

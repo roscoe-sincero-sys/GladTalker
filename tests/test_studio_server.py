@@ -1,4 +1,5 @@
 import io
+import os
 import shutil
 import tempfile
 import threading
@@ -16,6 +17,7 @@ from src.studio import pipeline
 from src.studio.faces import FaceBox
 from src.studio.jobs import JobManager
 from src.studio.server import DEFAULT_HOSTS, DEFAULT_ORIGINS, StudioConfig, StudioServices, create_app
+from tests._file_locks import exclusive_open, windows_only
 
 REAL_CHECK_MODELS = pipeline.check_models  # setUp stubs it out for most tests
 
@@ -406,21 +408,35 @@ class StudioServerTests(unittest.TestCase):
         return root
 
     def _changing_while_hashed(self, rel_name):
-        """Make verification of ``rel_name`` exhaust its retries (the file keeps changing)."""
+        """Make verification of ``rel_name`` exhaust its retries: the file is modified each time
+        it has just been hashed."""
         from scripts import download_models as dm
 
-        real = dm.hash_snapshot
+        real = dm._hash_open_file
+        touches = []
 
-        def flaky(dest, attempts=3):
-            if Path(dest).name == rel_name:
-                raise dm.FileChangedError(f"{rel_name} kept changing while it was being verified; try again.")
-            return real(dest, attempts)
+        def hash_then_touch(f):
+            digest = real(f)
+            if Path(f.name).name == rel_name:
+                touches.append(1)
+                stamp = 1_700_000_000_000_000_000 + len(touches) * 1_000_000_000
+                os.utime(f.name, ns=(stamp, stamp))
+            return digest
 
-        return mock.patch.object(dm, "hash_snapshot", flaky)
+        return mock.patch.object(dm, "_hash_open_file", hash_then_touch)
+
+    def _age_models(self, root):
+        """Make the files look long installed, so their verified digests are served from cache."""
+        past = time.time_ns() - 60 * 1_000_000_000
+        for path in root.rglob("*.pth"):
+            os.utime(path, ns=(past, past))
+        for path in root.rglob("*.safetensors"):
+            os.utime(path, ns=(past, past))
 
     def test_changing_checkpoint_is_busy_not_damaged(self):
         self._install_models()
-        with self._changing_while_hashed("detection_Resnet50_Final.pth"),                 mock.patch("facexlib.detection.init_detection_model") as init:
+        with self._changing_while_hashed("detection_Resnet50_Final.pth"), \
+                mock.patch("facexlib.detection.init_detection_model") as init:
             status = self.client.get("/models").json()
             entry = next(f for f in status["files"] if f["path"] == self.DETECTOR_REL)
             self.assertEqual((entry["state"], entry["busy"], entry["damaged"], entry["ready"]),
@@ -443,15 +459,66 @@ class StudioServerTests(unittest.TestCase):
         # Once the file settles it verifies normally.
         self.assertTrue(self.client.get("/models").json()["complete"])
 
-    def test_locked_checkpoint_is_busy_not_damaged(self):
+    @windows_only
+    def test_locked_checkpoint_with_a_warm_cache_is_busy_not_ready(self):
+        """A digest cached while the file was readable must not make a locked file "ready"."""
+        root = self._install_models()
+        self._age_models(root)
+        self.assertTrue(self.client.get("/models").json()["complete"])  # warms the digest cache
+        with exclusive_open(root / self.DETECTOR_REL), \
+                mock.patch("facexlib.detection.init_detection_model") as init:
+            status = self.client.get("/models").json()
+            entry = next(f for f in status["files"] if f["path"] == self.DETECTOR_REL)
+            self.assertEqual((entry["state"], entry["ready"], entry["damaged"]), ("busy", False, False))
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertTrue(r.json()["retryable"])
+            r = self.client.post("/render/start", json=_render_body(self.image))
+            self.assertEqual(r.status_code, 503, r.text)
+        init.assert_not_called()
+        self.assertTrue(self.client.get("/models").json()["complete"])
+
+    def test_unopenable_checkpoint_is_busy_not_damaged(self):
+        """Portable version of the lock test: every model refuses to open (sharing violation)."""
         self._install_models()
         from scripts import download_models as dm
 
-        with mock.patch.object(dm, "hash_snapshot", side_effect=PermissionError(13, "in use")):
+        with mock.patch.object(dm, "open", create=True, side_effect=PermissionError(13, "in use")):
             status = self.client.get("/models").json()
             self.assertEqual(status["busy"], 8)
-            self.assertFalse(any(f["damaged"] for f in status["files"]))
+            self.assertFalse(any(f["damaged"] or f["ready"] for f in status["files"]))
             self.assertEqual(self.client.post("/render/start", json=_render_body(self.image)).status_code, 503)
+
+    def test_retry_after_is_readable_by_allowed_browser_origins(self):
+        self._install_models()
+        with self._changing_while_hashed("detection_Resnet50_Final.pth"):
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)},
+                                 headers={"Origin": "http://tauri.localhost"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.headers["access-control-allow-origin"], "http://tauri.localhost")
+        self.assertIn("retry-after", r.headers["access-control-expose-headers"].lower())
+
+    def test_model_busy_after_admission_fails_the_job_with_retry_advice_and_frees_the_lane(self):
+        from src.studio.jobs import RetryLaterError
+
+        busy = RetryLaterError("Some models are being updated or are in use by another program, so they "
+                               "couldn't be checked: x.pth. Try again in a moment.")
+        with mock.patch.object(pipeline, "check_models", side_effect=[None, busy]):
+            job_id = self.client.post("/render/start", json=_render_body(self.image)).json()["id"]
+            job = self._wait_for_job(job_id)
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("Try again in a moment", job["error"])
+        follow_up = self.jobs.submit("probe", "Probe", lambda ctx: {"ok": True}, lane="gpu")
+        self.assertEqual(self._wait_for_job(follow_up.id)["state"], "succeeded")
+
+    def _wait_for_job(self, job_id, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.client.get(f"/jobs/{job_id}").json()
+            if job["state"] in ("succeeded", "failed", "cancelled"):
+                return job
+            time.sleep(0.02)
+        self.fail(f"job {job_id} did not finish")
 
     def test_checksum_mismatch_is_damaged(self):
         root = self._install_models()

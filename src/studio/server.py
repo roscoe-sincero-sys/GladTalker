@@ -177,6 +177,7 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
         allow_origins=config.allowed_origins,
         allow_methods=["GET", "POST"],
         allow_headers=["Authorization", "Content-Type", "X-GladTalker-Token"],
+        expose_headers=["Retry-After"],  # so browser clients can honour a retryable 503
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts)
 

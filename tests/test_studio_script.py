@@ -104,6 +104,36 @@ class ParseScriptTests(unittest.TestCase):
         })
         self.assertEqual([l.speaker for l in req.script], [l.speaker for l in parsed.lines])
 
+    def _render_speakers(self, cast, parsed):
+        from src.studio.schemas import RenderRequest
+
+        req = RenderRequest.model_validate({
+            "image_path": "scene.png",
+            "cast": [{"name": n, "region": {"x": 0, "y": 0, "w": 64, "h": 64}} for n in cast],
+            "script": [{"speaker": l.speaker, "text": l.text} for l in parsed.lines],
+        })
+        return [(l.speaker, l.text) for l in req.script]
+
+    def test_screenplay_headers_use_unicode_case_folding(self):
+        """"STRASSE" is "Straße" (as render matching treats it), so the header starts a new line for
+        Straße instead of being folded into Brain's line."""
+        cast = ["Brain", "Straße"]
+        parsed = parse_script("BRAIN\nHi.\n\nSTRASSE\nGuten Tag.\n\nSTRASSE: Tschüss.", cast=cast)
+        expected = [("Brain", "Hi."), ("Straße", "Guten Tag."), ("Straße", "Tschüss.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_overlapping_underscore_names_keep_their_own_speaker(self):
+        cast = ["Crew", "_Crew"]
+        parsed = parse_script("_Crew: One.\nCrew: Two.\n__Crew__: Three.\n_CREW\nFour.\n\nCREW\nFive.\n"
+                              "**_Crew**\nSix.", cast=cast)
+        expected = [("_Crew", "One."), ("Crew", "Two."), ("Crew", "Three."), ("_Crew", "Four."),
+                    ("Crew", "Five."), ("_Crew", "Six.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
     def test_emphasis_is_still_stripped_from_names_outside_the_cast(self):
         r = parse_script("_Narrator_: Meanwhile.\n**Brain**: Hi.", cast=["Brain"])
         self.assertEqual([l.speaker for l in r.lines], ["Narrator", "Brain"])
