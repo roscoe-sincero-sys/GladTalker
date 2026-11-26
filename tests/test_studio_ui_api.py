@@ -277,6 +277,188 @@ class PreviewRetentionTests(unittest.TestCase):
         store.close()
         self.assertFalse(store.dir.exists())
 
+    def _age_marker(self, store):
+        old = time.time() - 120  # clearly stale (see test_a_dead_engines_folder_is_reclaimed_once_stale)
+        os.utime(store.dir / ".owner.lock", (old, old))
+
+    @unittest.skipUnless(os.name == "nt", "Windows refuses to delete a file that is held open")
+    def test_a_preview_held_open_at_shutdown_keeps_its_marker_until_a_later_engine_cleans_up(self):
+        store = PreviewStore(self.root)
+        wav = self._write(store.new_folder("j", self.jobs)) / "preview.wav"
+        with open(wav, "rb"):  # e.g. a media player still has it open
+            store.close()
+            self.assertTrue(wav.exists())
+            self.assertTrue((store.dir / ".owner.lock").exists(), "the proof a later engine needs to retry")
+        self._age_marker(store)
+        self._store(stale_s=60).new_folder("k", self.jobs)  # the next engine, once the file is released
+        self.assertFalse(store.dir.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows refuses to delete a file that is held open")
+    def test_reclaiming_a_dead_engine_retries_after_a_held_preview_is_released(self):
+        dead = PreviewStore(self.root, stale_s=0)
+        wav = self._write(dead.new_folder("abc", self.jobs)) / "preview.wav"
+        dead._lock.release()  # its process ended
+        dead._lock = None
+        self._age_marker(dead)
+        with open(wav, "rb"):
+            self._store(stale_s=60).new_folder("b", self.jobs)
+            self.assertTrue(wav.exists())
+            self.assertTrue((dead.dir / ".owner.lock").exists())
+        self._store(stale_s=60).new_folder("c", self.jobs)
+        self.assertFalse(dead.dir.exists())
+
+    def test_a_preview_that_cant_be_deleted_keeps_the_marker(self):
+        """Portable version of the held-file tests: the preview's folder refuses to go."""
+        from src.studio import previews
+
+        store = PreviewStore(self.root)
+        folder = self._write(store.new_folder("j", self.jobs))
+        # Nothing gets deleted: Windows cleanup goes through shutil.rmtree, POSIX through _remove_at.
+        with mock.patch.object(previews.shutil, "rmtree"), mock.patch.object(previews, "_remove_at"):
+            store.close()
+        self.assertTrue(folder.exists())
+        self.assertTrue((store.dir / ".owner.lock").exists())
+        self._age_marker(store)
+        self._store(stale_s=60).new_folder("k", self.jobs)
+        self.assertFalse(store.dir.exists())
+
+    def _outside_folder_with_a_stale_marker(self):
+        """A folder outside previews/ that looks like a dead engine's (marker and all)."""
+        target = self.tmp / "elsewhere"
+        target.mkdir()
+        (target / "precious.txt").write_text("keep me", encoding="utf-8")
+        (target / ".owner.lock").write_bytes(b"")
+        old = time.time() - 7 * 24 * 3600
+        os.utime(target / ".owner.lock", (old, old))
+        return target
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_a_junction_posing_as_an_engine_folder_is_never_entered(self):
+        import _winapi
+
+        target = self._outside_folder_with_a_stale_marker()
+        self.root.mkdir(parents=True)
+        link = self.root / "engine-0123456789ab"
+        _winapi.CreateJunction(str(target), str(link))
+        self.addCleanup(lambda: os.path.lexists(link) and os.rmdir(link))
+        self._store(stale_s=0).new_folder("j", self.jobs)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue((target / ".owner.lock").exists())
+        self.assertTrue(os.path.lexists(link), "skipped, not cleaned up through")
+
+    def test_a_symlink_posing_as_an_engine_folder_is_never_entered(self):
+        target = self._outside_folder_with_a_stale_marker()
+        self.root.mkdir(parents=True)
+        link = self.root / "engine-0123456789ab"
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"can't create symlinks here: {exc}")
+        self._store(stale_s=0).new_folder("j", self.jobs)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue(link.is_symlink())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_a_junction_inside_an_engine_folder_is_removed_as_a_link(self):
+        import _winapi
+
+        target = self.tmp / "elsewhere"
+        target.mkdir()
+        (target / "precious.txt").write_text("keep me", encoding="utf-8")
+        store = PreviewStore(self.root)
+        self._write(store.new_folder("j", self.jobs))
+        _winapi.CreateJunction(str(target), str(store.dir / "link"))
+        store.close()
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertFalse(store.dir.exists())
+
+    @unittest.skipUnless(os.name == "nt", "the guarantee Windows cleanup relies on")
+    def test_windows_pins_a_locked_engine_folder_so_its_path_cant_be_swapped(self):
+        store = self._store()
+        self._write(store.new_folder("j", self.jobs))
+        with self.assertRaises(PermissionError):
+            os.rename(store.dir, store.dir.with_name("engine-moved000000"))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX: cleanup works relative to an open directory")
+    def test_a_folder_swapped_for_a_link_mid_cleanup_never_redirects_deletion(self):
+        """POSIX lets a folder be renamed while cleanup runs; listing and deleting go through the
+        directory that was opened and checked, so a link put in its place is never followed."""
+        from src.studio import previews
+
+        target = self._outside_folder_with_a_stale_marker()
+        dead = PreviewStore(self.root, stale_s=0)
+        folder = self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()
+        dead._lock = None
+        self._age_marker(dead)
+        moved = dead.dir.with_name("engine-moved000000")
+        real_remove_at, swapped = previews._remove_at, []
+
+        def swap_then_remove(dir_fd, name):
+            if not swapped:  # the folder has been opened, checked and listed: now swap it
+                swapped.append(1)
+                os.rename(dead.dir, moved)
+                os.symlink(target, dead.dir, target_is_directory=True)
+            return real_remove_at(dir_fd, name)
+
+        # Only _remove_at is wrapped, so the real os functions pass _fd_relative_supported().
+        with mock.patch.object(previews, "_remove_at", swap_then_remove):
+            self._store(stale_s=60).new_folder("b", self.jobs)
+        self.assertTrue(swapped)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue((target / ".owner.lock").exists())
+        self.assertTrue(dead.dir.is_symlink(), "the link itself is left alone")
+        self.assertFalse((moved / folder.name).exists(), "the checked folder's previews were deleted")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX: cleanup works relative to an open directory")
+    def test_a_folder_swapped_for_a_link_before_it_is_opened_is_left_alone(self):
+        from src.studio import previews
+
+        target = self._outside_folder_with_a_stale_marker()
+        dead = PreviewStore(self.root, stale_s=0)
+        self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()
+        dead._lock = None
+        self._age_marker(dead)
+        original = previews._FileLock.acquire
+
+        def swap_then_acquire(lock, *args, **kwargs):
+            if lock.path.parent == dead.dir and not dead.dir.is_symlink():
+                os.rename(dead.dir, dead.dir.with_name("engine-moved000000"))
+                os.symlink(target, dead.dir, target_is_directory=True)
+            return original(lock, *args, **kwargs)
+
+        with mock.patch.object(previews._FileLock, "acquire", swap_then_acquire):
+            self._store(stale_s=60).new_folder("b", self.jobs)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue((target / ".owner.lock").exists())
+
+    def test_nothing_is_deleted_if_the_folder_or_marker_changed_once_locked(self):
+        from src.studio import previews
+
+        dead = PreviewStore(self.root, stale_s=0)
+        folder = self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()
+        dead._lock = None
+        self._age_marker(dead)
+        # Swapped meanwhile: Windows checks the marker by path (holds), POSIX relative to the
+        # opened folder (holds_at).
+        with mock.patch.object(previews._FileLock, "holds", return_value=False),                 mock.patch.object(previews._FileLock, "holds_at", return_value=False):
+            self._store(stale_s=60).new_folder("b", self.jobs)
+        self.assertTrue(folder.exists())
+        self.assertTrue((dead.dir / ".owner.lock").exists())
+
+    def test_a_running_engine_is_still_protected_while_its_folder_has_leftovers(self):
+        """A marker kept for a retry is never a way into a folder whose engine is running."""
+        other_jobs = JobManager(lanes={"audio": 1})
+        self.addCleanup(other_jobs.shutdown)
+        other = self._store(stale_s=0)
+        theirs = self._write(other.new_folder(self._finished_job(other_jobs).id, other_jobs))
+        self._age_marker(other)
+        self._store(stale_s=60).new_folder("a", self.jobs)
+        self.assertTrue(theirs.exists())
+        self.assertTrue((other.dir / ".owner.lock").exists())
+
 
 class TwoEnginesOneWorkspaceTests(unittest.TestCase):
     """Two engines on one workspace (two ports, or the e2e suite): a preview in one must not

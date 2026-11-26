@@ -29,6 +29,7 @@
   let mediaError = $state(''); // the video couldn't be fetched (token mode); Retry
   let captionError = $state(''); // the caption files couldn't be fetched; Retry captions
   let cancelPendingFor = $state(null); // Cancel pressed for this job id; shown until it ends
+  let cancelPressedFor = null; // the followed render the user pressed Cancel on (kept even if the request fails)
   let attachedId = null; // the render this view is following
   let watch = null; // its watcher; closed when the step closes or another render starts
   let destroyed = false;
@@ -86,6 +87,7 @@
   function attach(id) {
     attachedId = id;
     cancelPendingFor = null;
+    cancelPressedFor = null;
     watch?.close();
     watch = null;
     job = null;
@@ -103,10 +105,14 @@
     watch.done.then(
       (final) => {
         if (!mine() || !final) return;
+        // Pressing Cancel on this render is proof it was live, so its ending is news at once (even
+        // if the Cancel request itself failed); the lookup is only for a render this view merely
+        // attached to (from history or a reload).
+        const news = cancelPressedFor === id || wasRunning;
         // The video loads at once; only the announcement waits for the lookup.
-        if (final.state === 'succeeded') loadVideo(final, wasRunning);
-        else if (final.state === 'failed') whenNews(wasRunning, mine, () => announceError(`Render failed: ${final.error || final.message}`));
-        else if (final.state === 'cancelled') whenNews(wasRunning, mine, () => announce('Render cancelled.'));
+        if (final.state === 'succeeded') loadVideo(final, news);
+        else if (final.state === 'failed') whenNews(news, mine, () => announceError(`Render failed: ${final.error || final.message}`));
+        else if (final.state === 'cancelled') whenNews(news, mine, () => announce('Render cancelled.'));
       },
       (err) => {
         // The engine no longer knows this job (it restarted, or dropped it from its history).
@@ -177,17 +183,20 @@
     }
   }
 
-  // The cancel answer is only an acknowledgement: the watcher stays the one source of the job's
-  // state, so a late answer can never put a finished render back to "Cancelling".
+  // The request is announced when Cancel is pressed; the watcher then announces how the render
+  // ended. The engine's answer is only an acknowledgement and announces nothing, so a late answer
+  // can never put a finished render back to "Cancelling" (on screen or for a screen reader).
   async function cancel() {
     const id = job.id;
     cancelPendingFor = id;
+    cancelPressedFor = id;
+    announce('Cancelling the render…');
     try {
       await api.cancelJob(id);
-      if (attachedId === id) announce('Cancelling the render…');
     } catch (err) {
       if (cancelPendingFor === id) cancelPendingFor = null;
-      announceError(err.message);
+      // Only news while that render is still the one shown and still running.
+      if (attachedId === id && !destroyed && running) announceError(err.message);
     }
   }
 

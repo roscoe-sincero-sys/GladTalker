@@ -229,14 +229,17 @@ test('a late Cancel acknowledgement never brings back a render that has already 
   await page.getByRole('button', { name: /Render video/ }).click();
   await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
 
+  const polite = page.locator('[role="status"][aria-live="polite"]').last();
   const release = await hold(page, `**/jobs/${id}/cancel`,
     (route) => route.fulfill({ json: renderSnapshot(id, 'running', { cancel_requested: true }) }));
   await page.getByRole('button', { name: 'Cancel' }).click();
   await release.reached;
   await expect(page.getByRole('button', { name: 'Cancelling…' })).toBeDisabled();
+  await expect(polite).toHaveText('Cancelling the render…'); // announced when pressed
   state = 'cancelled'; // the engine stops the render; the watcher sees it and stops polling
   await expect(page.getByRole('button', { name: 'Cancelling…' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+  await expect(polite).toHaveText('Render cancelled.'); // the watcher's cancelled snapshot
 
   const acked = page.waitForResponse(`**/jobs/${id}/cancel`);
   release(); // the old "running, cancel requested" answer arrives last
@@ -245,6 +248,68 @@ test('a late Cancel acknowledgement never brings back a render that has already 
   await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Cancelling…' })).toHaveCount(0);
   await expect(page.getByText('Cancelled.').first()).toBeVisible();
+  await expect(polite).toHaveText('Render cancelled.'); // the terminal state is still what's announced
+});
+
+test('a slow first status lookup never holds back the announcement that a cancelled render ended', async ({ page }) => {
+  await openStudio(page);
+  await readyToRoll(page);
+  const id = 'fa0000000005';
+  let state = 'running';
+  const snapshot = () => renderSnapshot(id, state, state === 'cancelled' ? { message: 'Cancelled.' } : {});
+  await fakeRender(page, id, snapshot);
+  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot(id, 'queued') }));
+  // The first status request (the "was it still running?" lookup made on attaching) is held;
+  // the watcher's later polls are answered normally.
+  const lookup = await hold(page, `**/jobs/${id}`, (route) => route.fulfill({ json: snapshot() }));
+  await page.getByRole('button', { name: /Render video/ }).click();
+  await lookup.reached;
+  await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
+
+  const polite = page.locator('[role="status"][aria-live="polite"]').last();
+  const ack = await hold(page, `**/jobs/${id}/cancel`,
+    (route) => route.fulfill({ json: renderSnapshot(id, 'running', { cancel_requested: true }) }));
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await ack.reached;
+  await expect(polite).toHaveText('Cancelling the render…');
+  state = 'cancelled';
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+  await expect(polite).toHaveText('Render cancelled.'); // without waiting for the held lookup
+
+  lookup(); // the lookup now answers "cancelled": too late to matter
+  ack();
+  await page.waitForTimeout(300);
+  await expect(polite).toHaveText('Render cancelled.');
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+});
+
+test('a lost Cancel answer never holds back the announcement that the render was cancelled', async ({ page }) => {
+  await openStudio(page);
+  await readyToRoll(page);
+  const id = 'fa0000000006';
+  let state = 'running';
+  const snapshot = () => renderSnapshot(id, state, state === 'cancelled' ? { message: 'Cancelled.' } : {});
+  await fakeRender(page, id, snapshot);
+  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot(id, 'queued') }));
+  const lookup = await hold(page, `**/jobs/${id}`, (route) => route.fulfill({ json: snapshot() })); // slow first lookup
+  await page.getByRole('button', { name: /Render video/ }).click();
+  await lookup.reached;
+  await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
+
+  const polite = page.locator('[role="status"][aria-live="polite"]').last();
+  const lost = page.waitForEvent('requestfailed', (r) => r.url().endsWith(`/jobs/${id}/cancel`));
+  await page.route(`**/jobs/${id}/cancel`, (route) => route.abort('connectionreset'), { times: 1 });
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await lost; // the answer never arrives
+  await expect(polite).toHaveText('Cancelling the render…');
+  state = 'cancelled'; // the engine did get the request and stopped the render
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+  await expect(page.getByText('Cancelled.').first()).toBeVisible();
+  await expect(polite).toHaveText('Render cancelled.'); // without waiting for the held lookup
+
+  lookup();
+  await page.waitForTimeout(300);
+  await expect(polite).toHaveText('Render cancelled.');
 });
 
 test('a project file never contains a saved job id it shouldn’t follow, or lines removed after a preview', async ({ page }) => {
