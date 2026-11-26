@@ -122,21 +122,10 @@ async fn choose_engine_folder(app: AppHandle) -> Result<Option<Status>, String> 
             .set_title("Choose the GladTalker folder (the one with studio_server.py)")
             .blocking_pick_folder()?; // None: the user cancelled
         let folder = picked.into_path().ok()?;
-        if !engine::is_engine_folder(&folder) {
-            return Some(Status::NotFound {
-                message: format!(
-                    "{} isn't a GladTalker folder: it has no studio_server.py. Choose the folder you cloned or unzipped GladTalker into.",
-                    folder.display()
-                ),
-                folder: None,
-            });
-        }
-        if !engine::launcher_is_current(&folder) {
-            // Otherwise another, current checkout might quietly be used instead of the chosen one.
-            return Some(Status::NotFound {
-                message: engine::outdated_message(&folder),
-                folder: Some(folder.display().to_string()),
-            });
+        // Not GladTalker, or older than this app: explained (with "choose it again" as the next
+        // step) instead of searching on, so another checkout is never quietly used instead.
+        if let Err(status) = engine::check_chosen_folder(&folder) {
+            return Some(status);
         }
         let saved = config_file(&app)
             .map(|path| engine::save_choice(&path, &engine::SavedChoice { folder: Some(folder.clone()) }));

@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn a_failed_start_is_reported_and_leaves_no_engine() {
         let sup = Supervisor::<Fake>::default();
-        let status = sup.ensure(false, None, |_| Err(Status::NotFound { message: "none".into(), folder: None }));
+        let status = sup.ensure(false, None, |_| Err(Status::NotFound { message: "none".into(), folder: None, choose_again: false }));
         assert!(matches!(status, Status::NotFound { .. }));
         assert!(sup.current().is_none());
     }

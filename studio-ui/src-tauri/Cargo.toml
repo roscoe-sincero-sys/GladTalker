@@ -5,7 +5,7 @@ description = "GladTalker Studio desktop app: the Cast → Script → Roll UI wi
 authors = ["GladTalker contributors"]
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.79"
+rust-version = "1.90"  # tauri 2.12 and its plugins (Cargo.lock) need 1.90
 
 [lib]
 name = "gladtalker_studio_lib"

@@ -8,6 +8,10 @@
 
   const info = $derived(engine.desktop ?? {});
   const notFound = $derived(info.state === 'not_found');
+  // Try again searches for GladTalker afresh. It's offered for a folder that search found (once
+  // fixed, it finds it again), but not for one the user picked (choose_again), which the search
+  // wouldn't use: choosing it again is the way back.
+  const canTryAgain = $derived(!notFound || (Boolean(info.folder) && !info.choose_again));
 
   onMount(() => {
     document.getElementById('engine-setup-heading')?.focus();
@@ -40,7 +44,7 @@
 
   <div class="row">
     <button type="button" class="primary" onclick={chooseEngineFolder}>Choose GladTalker folder…</button>
-    {#if !notFound || info.folder}
+    {#if canTryAgain}
       <button type="button" onclick={() => connectEngine({ restart: true })}>Try again</button>
     {/if}
   </div>

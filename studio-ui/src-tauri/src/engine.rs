@@ -43,7 +43,9 @@ pub struct SavedChoice {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Status {
     /// No GladTalker folder (or no Python in it) was found: the UI asks the user to choose one.
-    NotFound { message: String, folder: Option<String> },
+    /// `choose_again`: the problem is with a folder the user picked, which "Try again" (a fresh
+    /// search) wouldn't use, so the only next step offered is choosing it again once fixed.
+    NotFound { message: String, folder: Option<String>, choose_again: bool },
     /// Started, but it stopped or never became ready.
     Failed { message: String, folder: String, python: String, log: String, log_path: String },
     /// Running and accepting requests at `base` with `token`. `note`: something the user should
@@ -70,14 +72,49 @@ pub fn launcher_is_current(folder: &Path) -> bool {
     fs::read_to_string(folder.join("studio_server.py")).is_ok_and(|text| text.contains(REQUIRED_LAUNCHER_OPTION))
 }
 
+/// For an older checkout found by searching: once it is updated, "Try again" finds it again.
 pub fn outdated_message(folder: &Path) -> String {
+    outdated_message_then(folder, "choose Try again")
+}
+
+/// For an older checkout the user picked: "Try again" searches afresh and wouldn't use it, so the
+/// next step is to pick it again once it is updated.
+pub fn outdated_choice_message(folder: &Path) -> String {
+    outdated_message_then(folder, "choose it again with Choose GladTalker folder…")
+}
+
+fn outdated_message_then(folder: &Path, next_step: &str) -> String {
     format!(
         "The GladTalker folder {} is older than this app: its studio_server.py doesn't support {}. \
-         Update that folder (for example with “git pull”, then reinstall its requirements), then choose \
-         Try again, or choose a newer GladTalker folder.",
+         Update that folder (for example with “git pull”, then reinstall its requirements), then {next_step}, \
+         or choose a newer GladTalker folder.",
         folder.display(),
         REQUIRED_LAUNCHER_OPTION
     )
+}
+
+/// Checks a folder the user picked before it is used. A folder that isn't GladTalker, or is
+/// older than this app, is explained here rather than searched past, so another checkout is
+/// never quietly used instead of the one chosen.
+pub fn check_chosen_folder(folder: &Path) -> Result<(), Status> {
+    if !is_engine_folder(folder) {
+        return Err(Status::NotFound {
+            message: format!(
+                "{} isn't a GladTalker folder: it has no studio_server.py. Choose the folder you cloned or unzipped GladTalker into.",
+                folder.display()
+            ),
+            folder: None,
+            choose_again: true,
+        });
+    }
+    if !launcher_is_current(folder) {
+        return Err(Status::NotFound {
+            message: outdated_choice_message(folder),
+            folder: Some(folder.display().to_string()),
+            choose_again: true,
+        });
+    }
+    Ok(())
 }
 
 /// `path` as a full path: relative ones are taken from `base` (the app's working directory), so
@@ -148,7 +185,11 @@ pub fn locate(candidates: &[PathBuf], override_python: Option<&Path>, base: &Pat
         return Ok(Located { folder, python });
     }
     if let Some(folder) = outdated {
-        return Err(Status::NotFound { message: outdated_message(&folder), folder: Some(folder.display().to_string()) });
+        return Err(Status::NotFound {
+            message: outdated_message(&folder),
+            folder: Some(folder.display().to_string()),
+            choose_again: false,
+        });
     }
     Err(match folder_without_python {
         Some(folder) => Status::NotFound {
@@ -158,12 +199,14 @@ pub fn locate(candidates: &[PathBuf], override_python: Option<&Path>, base: &Pat
                 folder.display()
             ),
             folder: Some(folder.display().to_string()),
+            choose_again: false,
         },
         None => Status::NotFound {
             message: "GladTalker Studio needs the GladTalker folder (the one with studio_server.py and its Python \
                       environment). Choose where it is on this computer."
                 .into(),
             folder: None,
+            choose_again: false,
         },
     })
 }
@@ -485,14 +528,14 @@ mod tests {
         assert_eq!(found.folder, usable);
 
         match locate(&[not_engine.clone(), no_python.clone()], None, tmp.path()) {
-            Err(Status::NotFound { message, folder }) => {
+            Err(Status::NotFound { message, folder, .. }) => {
                 assert!(message.contains("Python environment isn't set up"), "{message}");
                 assert_eq!(folder, Some(no_python.display().to_string()));
             }
             other => panic!("{other:?}"),
         }
         match locate(&[not_engine], None, tmp.path()) {
-            Err(Status::NotFound { folder: None, message }) => assert!(message.contains("Choose where it is")),
+            Err(Status::NotFound { folder: None, message, .. }) => assert!(message.contains("Choose where it is")),
             other => panic!("{other:?}"),
         }
     }
@@ -509,13 +552,65 @@ mod tests {
 
         assert_eq!(locate(&[old.clone(), current.clone()], None, tmp.path()).unwrap().folder, current);
         match locate(std::slice::from_ref(&old), None, tmp.path()) {
-            Err(Status::NotFound { message, folder }) => {
+            Err(Status::NotFound { message, folder, .. }) => {
                 assert!(message.contains("older than this app") && message.contains("git pull"), "{message}");
                 assert!(message.contains("--exit-with-parent"), "{message}");
                 assert_eq!(folder, Some(old.display().to_string())); // the setup screen shows which folder
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_chosen_older_checkout_asks_to_choose_it_again_not_to_try_again() {
+        // "Try again" searches afresh and never sees a folder known only from the picker, so the
+        // way back for a picked Phase 2 checkout is picking it again once it is updated (issue #20).
+        let tmp = tempfile::tempdir().unwrap();
+        let old = engine_folder(&tmp.path().join("old"), Some("venv"));
+        fs::write(old.join("studio_server.py"), "p.add_argument('--open')\n").unwrap();
+        match check_chosen_folder(&old) {
+            Err(Status::NotFound { message, folder, choose_again }) => {
+                assert!(choose_again, "the setup screen must not offer Try again for it");
+                assert!(message.contains("older than this app") && message.contains("git pull"), "{message}");
+                assert!(message.contains("choose it again with Choose GladTalker folder…"), "{message}");
+                assert!(!message.contains("Try again"), "{message}");
+                assert_eq!(folder, Some(old.display().to_string()));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Once it is updated, choosing it again is accepted.
+        fs::write(old.join("studio_server.py"), format!("p.add_argument('{REQUIRED_LAUNCHER_OPTION}')\n")).unwrap();
+        assert_eq!(check_chosen_folder(&old), Ok(()));
+
+        // A folder found by searching keeps "Try again" (the search finds it again once updated).
+        let found = engine_folder(&tmp.path().join("found"), Some("venv"));
+        fs::write(found.join("studio_server.py"), "p.add_argument('--open')\n").unwrap();
+        match locate(std::slice::from_ref(&found), None, tmp.path()) {
+            Err(Status::NotFound { message, choose_again, .. }) => {
+                assert!(!choose_again);
+                assert!(message.contains("choose Try again"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_chosen_folder_that_isnt_gladtalker_is_explained() {
+        let tmp = tempfile::tempdir().unwrap();
+        match check_chosen_folder(tmp.path()) {
+            Err(Status::NotFound { message, folder: None, choose_again: true }) => {
+                assert!(message.contains("isn't a GladTalker folder"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_setup_screen_is_told_whether_try_again_can_help() {
+        let status = Status::NotFound { message: "m".into(), folder: Some("C:/gt-old".into()), choose_again: true };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["state"], "not_found");
+        assert_eq!(json["choose_again"], true);
     }
 
     #[test]
