@@ -114,54 +114,71 @@ def model_manifest() -> list[tuple[str, str]]:
 
 
 def models_status(root: Path = REPO_ROOT) -> dict:
-    """Readiness of each model file. A file is ``ready`` only if it has its pinned size *and*
-    SHA-256. Truncated files are ``incomplete``, same-size files with bad contents are
-    ``damaged``; both are repaired by the next download job. Digests are cached by size+mtime,
-    so only the first check after a file changes hashes it."""
-    from scripts.download_models import expected_for, is_complete, is_verified
+    """Readiness of each model file (``state``: see ``verification_state``). A file is ``ready``
+    only if it has its pinned size *and* SHA-256. Truncated files are ``incomplete`` and files
+    whose completed check found a checksum mismatch are ``damaged``; both are repaired by the next
+    download job. A file that kept changing or was locked while being checked is ``busy``: that is
+    temporary, so clients should poll again (top-level ``busy`` > 0) rather than offer a repair.
+    Digests are cached by size+mtime, so only the first check after a file changes hashes it."""
+    from scripts.download_models import BUSY, DAMAGED, INCOMPLETE, MISSING, READY, expected_for, verification_state
 
     files = []
     for rel, url in model_manifest():
         path = Path(root) / rel
         expected = expected_for(rel)
-        exists = path.is_file()
-        right_size = is_complete(path, expected)
+        state = verification_state(path, expected)
         try:
-            ready = right_size and is_verified(path, expected)
-        except OSError:  # busy or being replaced right now: not ready, check again later
-            ready = False
+            size = path.stat().st_size if state != MISSING else None
+        except OSError:
+            size = None
         files.append({
             "path": rel,
             "name": path.name,
             "url": url,
-            "exists": exists,
-            "ready": ready,
-            "incomplete": exists and not right_size,
-            "damaged": right_size and not ready,
-            "size_bytes": path.stat().st_size if exists else None,
+            "state": state,
+            "exists": state != MISSING,
+            "ready": state == READY,
+            "incomplete": state == INCOMPLETE,
+            "damaged": state == DAMAGED,
+            "busy": state == BUSY,
+            "size_bytes": size,
             "expected_bytes": expected[0] if expected else None,
             "partial": any(path.parent.glob(path.name + ".*part")) if path.parent.is_dir() else False,
         })
     ready = sum(f["ready"] for f in files)
-    return {"ready": ready, "total": len(files), "complete": ready == len(files), "files": files}
+    return {"ready": ready, "busy": sum(f["busy"] for f in files), "total": len(files),
+            "complete": ready == len(files), "files": files}
 
 
 def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False) -> dict:
-    """Job body: fetch every missing model file, reporting per-file byte progress."""
-    from scripts.download_models import DownloadIntegrityError, download_file, expected_for, is_verified
+    """Job body: fetch every missing, incomplete or damaged model file (``force``: every file),
+    reporting per-file byte progress. A file that is busy (being replaced, or locked by another
+    program) is not something to repair: it is skipped, rechecked just before its turn, deferred if
+    the downloader reports the destination busy (DestinationBusyError, never a network or disk
+    failure), and listed in ``deferred`` while the rest of the queue proceeds."""
+    from scripts.download_models import (BUSY, READY, DestinationBusyError, DownloadIntegrityError, download_file,
+                                         expected_for, verification_state)
+
+    def state_of(rel: str) -> str:
+        return verification_state(Path(root) / rel, expected_for(rel))
 
     manifest = model_manifest()
-    todo = [(rel, url) for rel, url in manifest
-            if force or not is_verified(Path(root) / rel, expected_for(rel))]
+    states = {} if force else {rel: state_of(rel) for rel, _ in manifest}
+    todo = [(rel, url) for rel, url in manifest if states.get(rel) not in (READY, BUSY)]
+    deferred = [rel for rel, _ in manifest if states.get(rel) == BUSY]
     ctx.set_stages([Path(rel).name for rel, _ in todo] or ["check"])
-    if not todo:
-        ctx.progress(1.0, "All models are already downloaded.", stage="check")
-        return {"downloaded": [], "status": models_status(root)}
 
     downloaded = []
     for i, (rel, url) in enumerate(todo):
         name = Path(rel).name
         last = [0.0]
+        state = state_of(rel)
+        if state == BUSY:
+            deferred.append(rel)
+            ctx.log(f"Skipped {rel}: it is being updated or in use by another program")
+            continue
+        if state == READY and not force:
+            continue  # another writer finished it meanwhile
 
         def on_chunk(done: int, total: Optional[int], i=i, name=name, last=last) -> None:
             now = time.monotonic()
@@ -177,9 +194,19 @@ def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False
         ctx.progress(i / len(todo), f"Downloading {name} ({i + 1} of {len(todo)})…", stage=name)
         try:
             download_file(url, Path(root) / rel, force=force, progress=on_chunk, expected=expected_for(rel))
+        except DestinationBusyError:  # only the destination being in use, never a download failure
+            deferred.append(rel)
+            ctx.log(f"Skipped {rel}: it became busy, so it couldn't be checked or replaced")
+            continue
         except DownloadIntegrityError as exc:
             raise UserFacingError(str(exc)) from exc
-        except OSError as exc:  # URLError, timeouts, disk full...
+        except PermissionError as exc:  # e.g. a read-only model file or folder: waiting won't help
+            raise UserFacingError(
+                f"Couldn't replace {name}: GladTalker isn't allowed to change it "
+                f"({exc.strerror or exc}). Make sure the file isn't read-only and that you can write "
+                f"to {Path(root, rel).parent}, then choose Download Models again."
+            ) from exc
+        except OSError as exc:  # URLError, timeouts, disk full, temporary-file problems...
             reason = getattr(exc, "reason", None) or exc.strerror or exc
             raise UserFacingError(
                 f"Couldn't download {name}: {reason}. Check your internet connection and free disk "
@@ -188,4 +215,14 @@ def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False
         downloaded.append(rel)
         ctx.log(f"Downloaded {rel}")
 
-    return {"downloaded": downloaded, "status": models_status(root)}
+    status = models_status(root)
+    if status["complete"]:
+        message = "All models are downloaded and verified."
+    elif deferred:
+        names = ", ".join(Path(rel).name for rel in deferred)
+        message = (f"Some models are being updated or are in use by another program, so they were "
+                   f"left alone: {names}. GladTalker will check them again.")
+    else:
+        message = "Some models still need downloading. Choose Download Models again."
+    ctx.progress(1.0, message)
+    return {"downloaded": downloaded, "deferred": deferred, "status": status, "message": message}

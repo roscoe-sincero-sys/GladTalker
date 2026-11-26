@@ -1,4 +1,5 @@
 import io
+import os
 import shutil
 import tempfile
 import threading
@@ -16,6 +17,9 @@ from src.studio import pipeline
 from src.studio.faces import FaceBox
 from src.studio.jobs import JobManager
 from src.studio.server import DEFAULT_HOSTS, DEFAULT_ORIGINS, StudioConfig, StudioServices, create_app
+from tests._file_locks import exclusive_open, range_lock, windows_only
+
+REAL_CHECK_MODELS = pipeline.check_models  # setUp stubs it out for most tests
 
 
 class FakeTTS:
@@ -121,6 +125,14 @@ class StudioServerTests(unittest.TestCase):
     def test_tts_preview_validates(self):
         self.assertEqual(self.client.post("/tts/preview", json={"text": "", "semitones": 0}).status_code, 422)
         self.assertEqual(self.client.post("/tts/preview", json={"text": "Hi", "semitones": 9}).status_code, 422)
+
+    def test_tts_preview_rejects_whitespace_only_text(self):
+        self.services.tts.last = None
+        with mock.patch("src.studio.server.find_ffmpeg", return_value="ffmpeg"):
+            r = self.client.post("/tts/preview", json={"text": "  \t\n "})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("Enter some text to preview", r.text)
+        self.assertIsNone(self.services.tts.last)
 
     def test_tts_preview_without_ffmpeg(self):
         with mock.patch("src.studio.server.find_ffmpeg", return_value=None):
@@ -367,6 +379,282 @@ class StudioServerTests(unittest.TestCase):
             self.assertEqual(r.status_code, 413)
         uploads = self.tmp / "ws3" / "uploads"
         self.assertTrue(not uploads.exists() or not any(uploads.iterdir()))
+
+    # -- model verification: temporary (file changing / locked) vs damaged --------------------
+    DETECTOR_REL = "gfpgan/weights/detection_Resnet50_Final.pth"
+
+    def _install_models(self):
+        """Every model file under a temp root, pinned to its (tiny) contents."""
+        import hashlib
+
+        from scripts import download_models as dm
+        from src.studio.faces import FaceDetectorService
+        from src.studio.hardware import models_status
+
+        root = self.tmp / "models_root"
+        data = b"weights" * 64
+        pins = {}
+        for rel, _ in dm.MODELS:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(data)
+            pins[rel] = (len(data), hashlib.sha256(data).hexdigest())
+        self.services.detector = FaceDetectorService(model_root=str(root / "gfpgan" / "weights"))
+        # /models and the render precheck read this root instead of the repository's.
+        for patcher in (mock.patch.dict(dm.MODEL_CHECKSUMS, pins),
+                        mock.patch("src.studio.server.models_status", lambda: models_status(root)),
+                        mock.patch.object(pipeline, "check_models", lambda **kw: REAL_CHECK_MODELS(root, **kw))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return root
+
+    def _changing_while_hashed(self, rel_name):
+        """Make verification of ``rel_name`` exhaust its retries: the file is modified each time
+        it has just been hashed."""
+        from scripts import download_models as dm
+
+        real = dm._hash_open_file
+        touches = []
+
+        def hash_then_touch(f):
+            digest = real(f)
+            if Path(f.name).name == rel_name:
+                touches.append(1)
+                stamp = 1_700_000_000_000_000_000 + len(touches) * 1_000_000_000
+                os.utime(f.name, ns=(stamp, stamp))
+            return digest
+
+        return mock.patch.object(dm, "_hash_open_file", hash_then_touch)
+
+    def _age_models(self, root):
+        """Make the files look long installed, so their verified digests are served from cache."""
+        past = time.time_ns() - 60 * 1_000_000_000
+        for path in root.rglob("*.pth"):
+            os.utime(path, ns=(past, past))
+        for path in root.rglob("*.safetensors"):
+            os.utime(path, ns=(past, past))
+
+    def test_changing_checkpoint_is_busy_not_damaged(self):
+        self._install_models()
+        with self._changing_while_hashed("detection_Resnet50_Final.pth"), \
+                mock.patch("facexlib.detection.init_detection_model") as init:
+            status = self.client.get("/models").json()
+            entry = next(f for f in status["files"] if f["path"] == self.DETECTOR_REL)
+            self.assertEqual((entry["state"], entry["busy"], entry["damaged"], entry["ready"]),
+                             ("busy", True, False, False))
+            self.assertEqual((status["busy"], status["ready"], status["complete"]), (1, 7, False))
+
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertEqual(r.headers["retry-after"], "5")
+            self.assertTrue(r.json()["retryable"])
+            self.assertIn("Try Auto-Cast again in a moment", r.json()["detail"])
+
+            r = self.client.post("/render/start", json=_render_body(self.image))
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertEqual(r.headers["retry-after"], "5")
+            self.assertIn("detection_Resnet50_Final.pth", r.json()["detail"])
+            self.assertIn("Try again in a moment", r.json()["detail"])
+        init.assert_not_called()
+        self.assertEqual(self.client.get("/jobs").json()["jobs"], [])
+        # Once the file settles it verifies normally.
+        self.assertTrue(self.client.get("/models").json()["complete"])
+
+    @windows_only
+    def test_locked_checkpoint_with_a_warm_cache_is_busy_not_ready(self):
+        """A digest cached while the file was readable must not make a locked file "ready"."""
+        root = self._install_models()
+        self._age_models(root)
+        self.assertTrue(self.client.get("/models").json()["complete"])  # warms the digest cache
+        with exclusive_open(root / self.DETECTOR_REL), \
+                mock.patch("facexlib.detection.init_detection_model") as init:
+            status = self.client.get("/models").json()
+            entry = next(f for f in status["files"] if f["path"] == self.DETECTOR_REL)
+            self.assertEqual((entry["state"], entry["ready"], entry["damaged"]), ("busy", False, False))
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertTrue(r.json()["retryable"])
+            r = self.client.post("/render/start", json=_render_body(self.image))
+            self.assertEqual(r.status_code, 503, r.text)
+        init.assert_not_called()
+        self.assertTrue(self.client.get("/models").json()["complete"])
+
+    @windows_only
+    def test_lock_late_in_a_cached_checkpoint_is_busy_not_ready(self):
+        root = self._install_models()
+        self._age_models(root)
+        self.assertTrue(self.client.get("/models").json()["complete"])  # warms the digest cache
+        path = root / self.DETECTOR_REL
+        with range_lock(path, offset=path.stat().st_size - 16, length=16),                 mock.patch("facexlib.detection.init_detection_model") as init:
+            entry = next(f for f in self.client.get("/models").json()["files"] if f["path"] == self.DETECTOR_REL)
+            self.assertEqual(entry["state"], "busy")
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+            self.assertEqual(r.status_code, 503, r.text)
+        init.assert_not_called()
+
+    @windows_only
+    def test_lock_taken_while_the_detector_loads_gets_retry_advice(self):
+        """Verification passed, then another program locked the weights before the loader read
+        them: the load error becomes the retryable 503, not a 500."""
+        import contextlib
+
+        root = self._install_models()
+        path = root / self.DETECTOR_REL
+        with contextlib.ExitStack() as held:
+            def load(*args, **kwargs):  # facexlib's loader: reads the weights with torch.load
+                import torch
+
+                held.enter_context(range_lock(path, offset=0, length=path.stat().st_size))
+                return torch.load(str(path), map_location="cpu", weights_only=True)
+
+            with mock.patch("facexlib.detection.init_detection_model", side_effect=load):
+                r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertTrue(r.json()["retryable"])
+        self.assertIn("detection_Resnet50_Final.pth is being updated", r.json()["detail"])
+
+    @windows_only
+    def test_lock_during_load_gets_retry_advice_whatever_the_folder_casing(self):
+        """The configured detector folder is "gfpgan/weights" but the folders on disk are spelled
+        "GFPGAN/WEIGHTS": still the pinned file, so a late lock is still a retryable 503."""
+        import contextlib
+
+        from src.studio.faces import FaceDetectorService
+
+        root = self._install_models()
+        shutil.rmtree(root / "gfpgan")
+        (root / "GFPGAN" / "WEIGHTS").mkdir(parents=True)
+        (root / "GFPGAN" / "WEIGHTS" / "detection_Resnet50_Final.pth").write_bytes(b"weights" * 64)
+        self.services.detector = FaceDetectorService(model_root=str(root / "gfpgan" / "weights"))
+        path = root / "gfpgan" / "weights" / "detection_Resnet50_Final.pth"
+        with contextlib.ExitStack() as held:
+            def load(*args, **kwargs):
+                import torch
+
+                held.enter_context(range_lock(path, offset=0, length=path.stat().st_size))
+                return torch.load(str(path), map_location="cpu", weights_only=True)
+
+            with mock.patch("facexlib.detection.init_detection_model", side_effect=load):
+                r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertTrue(r.json()["retryable"])
+
+    @windows_only
+    def test_lock_during_load_gets_retry_advice_from_a_configured_model_folder(self):
+        """A detector configured with its own model folder (not ".../gfpgan/weights") is still
+        guarded with the file and pin its precheck verified."""
+        import contextlib
+
+        from src.studio.faces import FaceDetectorService
+
+        self._install_models()
+        folder = self.tmp / "my detector models"
+        folder.mkdir()
+        path = folder / "detection_Resnet50_Final.pth"
+        path.write_bytes(b"weights" * 64)  # matches the pin _install_models set
+        self.services.detector = FaceDetectorService(model_root=str(folder))
+        with contextlib.ExitStack() as held:
+            def load(*args, **kwargs):
+                import torch
+
+                held.enter_context(range_lock(path, offset=0, length=path.stat().st_size))
+                return torch.load(str(path), map_location="cpu", weights_only=True)
+
+            with mock.patch("facexlib.detection.init_detection_model", side_effect=load):
+                r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertEqual(r.headers["retry-after"], "5")
+
+    def test_detector_out_of_memory_is_not_disguised_by_a_busy_checkpoint(self):
+        """Running out of memory while the detector moves to its device isn't a model read, so it
+        isn't turned into retry advice even if a model file happens to be busy then."""
+        import torch
+
+        from scripts import download_models as dm
+
+        self._install_models()
+        oom = torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+        with mock.patch("facexlib.detection.init_detection_model", side_effect=oom):
+            real_state = dm.verification_state
+            calls = []
+
+            def state(dest, expected, **kw):  # the pre-load check passes; any later check finds it busy
+                calls.append(dest)
+                return real_state(dest, expected, **kw) if len(calls) == 1 else dm.BUSY
+
+            with mock.patch.object(dm, "verification_state", state):
+                client = TestClient(create_app(self.config, self.services), raise_server_exceptions=False)
+                r = client.post("/cast/detect", json={"image_path": str(self.image)})
+                client.close()
+        self.assertEqual(r.status_code, 500)
+        self.assertEqual(len(calls), 1)  # nothing was rehashed after the failure
+
+    def test_load_failure_with_healthy_weights_is_not_disguised(self):
+        self._install_models()
+        with mock.patch("facexlib.detection.init_detection_model", side_effect=RuntimeError("boom")):
+            client = TestClient(create_app(self.config, self.services), raise_server_exceptions=False)
+            r = client.post("/cast/detect", json={"image_path": str(self.image)})
+            client.close()
+        self.assertEqual(r.status_code, 500)
+
+    def test_unopenable_checkpoint_is_busy_not_damaged(self):
+        """Portable version of the lock test: every model refuses to open (sharing violation)."""
+        self._install_models()
+        from scripts import download_models as dm
+
+        with mock.patch.object(dm, "open", create=True, side_effect=PermissionError(13, "in use")):
+            status = self.client.get("/models").json()
+            self.assertEqual(status["busy"], 8)
+            self.assertFalse(any(f["damaged"] or f["ready"] for f in status["files"]))
+            self.assertEqual(self.client.post("/render/start", json=_render_body(self.image)).status_code, 503)
+
+    def test_retry_after_is_readable_by_allowed_browser_origins(self):
+        self._install_models()
+        with self._changing_while_hashed("detection_Resnet50_Final.pth"):
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)},
+                                 headers={"Origin": "http://tauri.localhost"})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.headers["access-control-allow-origin"], "http://tauri.localhost")
+        self.assertIn("retry-after", r.headers["access-control-expose-headers"].lower())
+
+    def test_model_busy_after_admission_fails_the_job_with_retry_advice_and_frees_the_lane(self):
+        from src.studio.jobs import RetryLaterError
+
+        busy = RetryLaterError("Some models are being updated or are in use by another program, so they "
+                               "couldn't be checked: x.pth. Try again in a moment.")
+        with mock.patch.object(pipeline, "check_models", side_effect=[None, busy]):
+            job_id = self.client.post("/render/start", json=_render_body(self.image)).json()["id"]
+            job = self._wait_for_job(job_id)
+        self.assertEqual(job["state"], "failed")
+        self.assertIn("Try again in a moment", job["error"])
+        follow_up = self.jobs.submit("probe", "Probe", lambda ctx: {"ok": True}, lane="gpu")
+        self.assertEqual(self._wait_for_job(follow_up.id)["state"], "succeeded")
+
+    def _wait_for_job(self, job_id, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.client.get(f"/jobs/{job_id}").json()
+            if job["state"] in ("succeeded", "failed", "cancelled"):
+                return job
+            time.sleep(0.02)
+        self.fail(f"job {job_id} did not finish")
+
+    def test_checksum_mismatch_is_damaged(self):
+        root = self._install_models()
+        path = root / self.DETECTOR_REL
+        path.write_bytes(b"X" + path.read_bytes()[1:])  # same size, different bytes
+        status = self.client.get("/models").json()
+        entry = next(f for f in status["files"] if f["path"] == self.DETECTOR_REL)
+        self.assertEqual((entry["state"], entry["damaged"], entry["busy"]), ("damaged", True, False))
+        self.assertEqual(status["busy"], 0)
+
+        r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("incomplete or damaged", r.json()["detail"])
+        self.assertNotIn("retry-after", r.headers)
+
+        r = self.client.post("/render/start", json=_render_body(self.image))
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("damaged: detection_Resnet50_Final.pth", r.json()["detail"])
 
     def test_model_download_admission_is_atomic(self):
         gate = threading.Event()

@@ -3,7 +3,7 @@
   // progress. Shown whenever something is missing, before any terminal command would be needed.
   import { onDestroy } from 'svelte';
   import { api } from '../lib/api.js';
-  import { engine, refreshModels } from '../lib/app-state.svelte.js';
+  import { engine, pollBusyModels, refreshModels } from '../lib/app-state.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import JobProgress from './JobProgress.svelte';
 
@@ -14,7 +14,15 @@
 
   const ffmpeg = $derived(engine.hardware?.ffmpeg);
   const models = $derived(engine.models);
-  const missing = $derived(models ? models.files.filter((f) => !f.ready) : []);
+  // A busy file was being replaced or locked while the engine checked it: nothing to repair,
+  // so it isn't offered for download; check again shortly instead.
+  const missing = $derived(models ? models.files.filter((f) => !f.ready && !f.busy) : []);
+  const busy = $derived(models ? models.files.filter((f) => f.busy) : []);
+  const poller = pollBusyModels();
+  onDestroy(() => poller.stop());
+  $effect(() => {
+    if (busy.length) poller.poke();
+  });
 
   const downloading = $derived(Boolean(job && (job.state === 'queued' || job.state === 'running')));
 
@@ -28,7 +36,11 @@
       const final = await watch.done;
       if (final === null) return; // closed: the panel went away
       await refreshModels();
-      if (final?.state === 'succeeded') announce('All models are downloaded and verified.');
+      if (final?.state === 'succeeded') {
+        // Announce what the refreshed status shows: busy files may have been left for later.
+        if (engine.models?.complete) announce('All models are downloaded and verified.');
+        else announce(final.result?.message || 'Some models still need attention. See Setup.');
+      }
       else if (final?.state === 'failed') announceError(final.error || 'The download failed.');
     } catch (err) {
       error = err.message;
@@ -53,16 +65,24 @@
       {#if models?.complete}
         <span class="ok-text">All {models.total} models downloaded and verified</span>
       {:else if models}
-        <span class="error-text">{missing.length} of {models.total} models need downloading</span>
-        <ul>
-          {#each missing as f (f.path)}
-            <li>{f.name}{f.damaged ? ' (damaged)' : f.incomplete ? ' (incomplete)' : ''}</li>
-          {/each}
-        </ul>
+        {#if missing.length}
+          <span class="error-text">{missing.length} of {models.total} models need downloading</span>
+          <ul>
+            {#each missing as f (f.path)}
+              <li>{f.name}{f.damaged ? ' (damaged)' : f.incomplete ? ' (incomplete)' : ''}</li>
+            {/each}
+          </ul>
+        {/if}
+        {#if busy.length}
+          <span>Checking again shortly: {busy.length === 1 ? 'a model is' : `${busy.length} models are`} being updated or in use by another program</span>
+          <ul>
+            {#each busy as f (f.path)}<li>{f.name}</li>{/each}
+          </ul>
+        {/if}
       {/if}
     </li>
   </ul>
-  {#if models && !models.complete}
+  {#if missing.length}
     <button type="button" class="primary" onclick={() => { if (!downloading) download(); }}
       aria-disabled={downloading ? 'true' : undefined}>Download models (about 2.5 GB)</button>
   {/if}

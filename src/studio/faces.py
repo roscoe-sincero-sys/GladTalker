@@ -187,23 +187,34 @@ class FaceDetectorService:
         self._net = None
         self._lock = threading.Lock()
 
+    def model_file(self) -> tuple[Path, tuple[int, str]]:
+        """The RetinaFace weights in this service's model folder, and the pin they must match."""
+        from scripts.download_models import expected_for
+
+        return Path(self.model_root) / DETECTOR_WEIGHTS, expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}")
+
     def check_model(self) -> None:
         """Verify the RetinaFace weights against their pinned size and SHA-256 before facexlib
         touches them: facexlib would silently use a damaged file, or download a missing one with
         no checksum. Only this one file is required, so casting works before render models are
         installed."""
-        from scripts.download_models import expected_for, is_verified
+        from scripts.download_models import BUSY, MISSING, READY, verification_state
 
-        from src.studio.jobs import UserFacingError
+        from src.studio.jobs import RetryLaterError, UserFacingError
 
-        path = Path(self.model_root) / DETECTOR_WEIGHTS
-        expected = expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}")
-        if not path.is_file():
+        path, expected = self.model_file()
+        state = verification_state(path, expected)
+        if state == MISSING:
             raise UserFacingError(
                 f"The face-detection model ({DETECTOR_WEIGHTS}) isn't downloaded yet. "
                 "Choose Download Models, then try Auto-Cast again."
             )
-        if not is_verified(path, expected):
+        if state == BUSY:
+            raise RetryLaterError(
+                f"The face-detection model ({DETECTOR_WEIGHTS}) is being updated or is in use by "
+                "another program, so it couldn't be checked. Try Auto-Cast again in a moment."
+            )
+        if state != READY:
             raise UserFacingError(
                 f"The face-detection model ({DETECTOR_WEIGHTS}) is incomplete or damaged. "
                 "Choose Download Models to repair it, then try Auto-Cast again."
@@ -213,10 +224,16 @@ class FaceDetectorService:
         if self._net is None:
             from facexlib.detection import init_detection_model
 
+            from src.studio.model_reads import explain_checkpoint_reads
+
             self.check_model()
-            self._net = init_detection_model(
-                "retinaface_resnet50", half=False, device=self.device, model_rootpath=self.model_root
-            )
+            # A lock taken after the check above still gets retry advice rather than a bare error,
+            # but only a failed read of the very file (and pin) the check just verified.
+            path, expected = self.model_file()
+            with explain_checkpoint_reads(files={path: expected}):
+                self._net = init_detection_model(
+                    "retinaface_resnet50", half=False, device=self.device, model_rootpath=self.model_root
+                )
         return self._net
 
     def detect(self, image_bgr: np.ndarray, min_confidence: float = 0.2, max_faces: int = 8) -> list[FaceBox]:

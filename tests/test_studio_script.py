@@ -84,6 +84,213 @@ class ParseScriptTests(unittest.TestCase):
         })
         self.assertEqual({l.speaker for l in req.script}, {"Officer  Mia"})
 
+    def test_cast_label_with_literal_underscores_is_preserved(self):
+        """Underscores that belong to a cast name are not Markdown emphasis: the imported lines keep
+        the stored spelling and render with that cast, while emphasis around a name still works."""
+        from src.studio.schemas import RenderRequest
+
+        cast = ["Crew_", "_Pilot", "Brain"]
+        parsed = parse_script("Crew_: Ready.\n**Crew_**: Set.\n_Pilot: Go.\n__Brain__: Click it.\n"
+                              "CREW_\nStill here.\n**_Pilot**\nLanding.", cast=cast)
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], [
+            ("Crew_", "Ready."), ("Crew_", "Set."), ("_Pilot", "Go."), ("Brain", "Click it."),
+            ("Crew_", "Still here."), ("_Pilot", "Landing."),
+        ])
+        self.assertEqual(parsed.unknown_speakers, [])
+        req = RenderRequest.model_validate({
+            "image_path": "scene.png",
+            "cast": [{"name": n, "region": {"x": 0, "y": 0, "w": 64, "h": 64}} for n in cast],
+            "script": [{"speaker": l.speaker, "text": l.text} for l in parsed.lines],
+        })
+        self.assertEqual([l.speaker for l in req.script], [l.speaker for l in parsed.lines])
+
+    def _render_speakers(self, cast, parsed):
+        from src.studio.schemas import RenderRequest
+
+        req = RenderRequest.model_validate({
+            "image_path": "scene.png",
+            "cast": [{"name": n, "region": {"x": 0, "y": 0, "w": 64, "h": 64}} for n in cast],
+            "script": [{"speaker": l.speaker, "text": l.text} for l in parsed.lines],
+        })
+        return [(l.speaker, l.text) for l in req.script]
+
+    def test_screenplay_headers_use_unicode_case_folding(self):
+        """"STRASSE" is "Straße" (as render matching treats it), so the header starts a new line for
+        Straße instead of being folded into Brain's line."""
+        cast = ["Brain", "Straße"]
+        parsed = parse_script("BRAIN\nHi.\n\nSTRASSE\nGuten Tag.\n\nSTRASSE: Tschüss.", cast=cast)
+        expected = [("Brain", "Hi."), ("Straße", "Guten Tag."), ("Straße", "Tschüss.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_overlapping_underscore_names_keep_their_own_speaker(self):
+        cast = ["Crew", "_Crew"]
+        parsed = parse_script("_Crew: One.\nCrew: Two.\n__Crew__: Three.\n_CREW\nFour.\n\nCREW\nFive.\n"
+                              "**_Crew**\nSix.", cast=cast)
+        expected = [("_Crew", "One."), ("Crew", "Two."), ("Crew", "Three."), ("_Crew", "Four."),
+                    ("Crew", "Five."), ("_Crew", "Six.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_balanced_emphasis_means_the_same_speaker_inline_and_as_a_header(self):
+        """The whole label is compared first ("_Crew" is _Crew), then one matched pair of emphasis
+        markers is removed ("_Crew_" is emphasised Crew), the same way on both kinds of line."""
+        cast = ["Crew", "_Crew"]
+        parsed = parse_script("_Crew_: Hello.\n_Crew: Hi.\n**_Crew_**: Hey.\n**Crew:** Yo.\n\n"
+                              "_Crew_\nFrom the header.\n\n_Crew\nFrom the other header.", cast=cast)
+        expected = [("Crew", "Hello."), ("_Crew", "Hi."),
+                    ("Crew", "Hey."),  # bold around italic Crew
+                    ("Crew", "Yo."), ("Crew", "From the header."), ("_Crew", "From the other header.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_cast_names_with_parentheses_or_colons_beat_their_shorter_prefix(self):
+        """A complete cast label wins over a shorter cast name before "(" or ":" is read as a note
+        or separator; a parenthetical that isn't part of a name is still the note."""
+        cast = ["Dr. Moss", "Dr. Moss (Guest)", "Team", "Team: Blue"]
+        parsed = parse_script("Dr. Moss (Guest): Ready.\nDr. Moss: Hi.\nDr. Moss (nervous): Um.\n"
+                              "Team: Blue: Ready.\nTeam: Go.\n**Team: Blue**: Bold.\nTeam: Blue\nWe win.\n\n"
+                              "DR. MOSS (GUEST)\nAs a header.", cast=cast)
+        expected = [("Dr. Moss (Guest)", "Ready."), ("Dr. Moss", "Hi."), ("Dr. Moss", "Um."),
+                    ("Team: Blue", "Ready."), ("Team", "Go."), ("Team: Blue", "Bold."),
+                    ("Team: Blue", "We win."), ("Dr. Moss (Guest)", "As a header.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual([l.note for l in parsed.lines], [None, None, "nervous", None, None, None, None, None])
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_a_cast_name_that_looks_like_a_list_marker_is_tried_as_typed_first(self):
+        cast = ["Operator", "- Operator", "Brain"]
+        parsed = parse_script("- Operator\nCome in.\n\n- Operator: Over.\n- **Brain:** Bulleted.\n"
+                              "* Operator: Also bulleted.\nOperator: Plain.", cast=cast)
+        expected = [("- Operator", "Come in."), ("- Operator", "Over."), ("Brain", "Bulleted."),
+                    ("Operator", "Also bulleted."), ("Operator", "Plain.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_finding_a_label_never_depends_on_how_long_the_dialogue_is(self):
+        """Colons in the dialogue (clock times) aren't examined beyond the longest possible label,
+        and the dialogue is sliced once, after the label is chosen."""
+        from unittest import mock
+
+        from src.studio import script
+
+        cast = ["Dr. Moss", "Dr. Moss (Guest)"]
+        times = ", ".join(f"{h}:{m:02d}" for h in range(1, 13) for m in (0, 15, 30, 45))
+        processed = []
+        real_key = script.name_key
+
+        def counting_key(name):
+            processed.append(len(name))
+            return real_key(name)
+
+        work = {}
+        for repeat in (1, 40):
+            processed.clear()
+            line = f"Dr. Moss (Guest): Meet me at {times}." * repeat
+            with mock.patch.object(script, "name_key", counting_key):
+                parsed = parse_script(line, cast=cast)
+            self.assertEqual(parsed.lines[0].speaker, "Dr. Moss (Guest)")
+            self.assertTrue(parsed.lines[0].text.startswith("Meet me at 1:00"))
+            work[len(line)] = sum(processed)
+        short, long = work.values()
+        self.assertEqual(long, short, work)  # a 40x longer line costs nothing more to label
+        self.assertLess(short, 3_000, work)  # about 20 colons within reach of a 16-character name
+
+    def test_padding_never_pushes_a_longer_cast_name_out_of_reach(self):
+        """The search limit ignores spacing, like name matching: alignment spaces or a note before
+        the colon still find "Team: Blue" rather than the shorter "Team"."""
+        cast = ["Team", "Team: Blue"]
+        pad = " " * 300
+        parsed = parse_script(f"Team: Blue (calmly){pad}: Ready.\nTeam:{pad}Blue{pad}: Go.\n"
+                              f"Team{pad}: Plain.\nTEAM:  BLUE\nWe win.", cast=cast)
+        expected = [("Team: Blue", "Ready."), ("Team: Blue", "Go."), ("Team", "Plain."), ("Team: Blue", "We win.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.lines[0].note, "calmly")
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_long_cast_names_that_dont_fit_cost_nothing_per_line(self):
+        """The label search follows only cast names that still match the text, so a long cast entry
+        (unrelated, or sharing the speaker's first words) adds no work to each line."""
+        from unittest import mock
+
+        from src.studio import script
+
+        times = ", ".join(f"{h}:{m:02d}" for h in range(1, 13) for m in (0, 15, 30, 45))
+        line = f"Dr. Moss (Guest): Meet me at {times}."
+        real_key = script.name_key
+
+        def per_line_work(cast):
+            totals = []
+            for count in (1, 20):
+                processed = []
+                with mock.patch.object(script, "name_key", lambda name: (processed.append(len(name)), real_key(name))[1]):
+                    parsed = parse_script("\n".join([line] * count), cast=cast)
+                self.assertEqual({l.speaker for l in parsed.lines}, {"Dr. Moss (Guest)"})
+                totals.append(sum(processed))
+            return (totals[1] - totals[0]) / 19
+
+        short = ["Dr. Moss", "Dr. Moss (Guest)"]
+        baseline = per_line_work(short)
+        self.assertLess(baseline, 3_000)
+        for extra in ("Narrator" * 1_500, "Dr. Moss " + "the Elder " * 1_000):
+            self.assertEqual(per_line_work(short + [extra]), baseline, len(extra))
+
+    def test_a_long_near_match_doesnt_make_every_colon_a_candidate(self):
+        """A cast entry that matches almost the whole line (colons and all) keeps the scan going,
+        but labels are only checked where a whole cast name ends, so the work is the input's size,
+        not its length times its colons."""
+        from unittest import mock
+
+        from src.studio import script
+
+        real_key = script.name_key
+        examined = {}
+        for entries in (10, 40, 160):
+            times = ", ".join(f"{h % 12 + 1}:{m:02d}" for h in range(entries) for m in (0, 30))
+            line = f"Dr. Moss (Guest): Meet me at {times}."
+            cast = ["Dr. Moss", "Dr. Moss (Guest)", line[:-6] + " zzz"]
+            processed = []
+            with mock.patch.object(script, "name_key", lambda name: (processed.append(len(name)), real_key(name))[1]):
+                parsed = parse_script(line, cast=cast)
+            self.assertEqual((parsed.lines[0].speaker, parsed.lines[0].text[:7]), ("Dr. Moss (Guest)", "Meet me"))
+            cast_list_work = 2 * sum(len(c) for c in cast)  # normalizing the cast list itself, once
+            examined[len(line)] = sum(processed) - cast_list_work
+        self.assertEqual(len(set(examined.values())), 1, examined)  # the same few label checks at every size
+        self.assertLess(max(examined.values()), 200, examined)
+
+    def test_a_huge_run_of_spaces_is_read_once(self):
+        from unittest import mock
+
+        from src.studio import script
+
+        processed = []
+        real_key = script.name_key
+
+        def counting_key(name):
+            processed.append(len(name))
+            return real_key(name)
+
+        line = "Team: Blue" + " " * 100_000 + ": Ready. " + "Then at 10:15: go. " * 200
+        with mock.patch.object(script, "name_key", counting_key):
+            parsed = parse_script(line, cast=["Team", "Team: Blue"])
+        self.assertEqual((parsed.lines[0].speaker, parsed.lines[0].text[:6]), ("Team: Blue", "Ready."))
+        self.assertLess(sum(processed), 3_000)
+
+    def test_a_headers_note_goes_with_the_line_after_it(self):
+        parsed = parse_script("Mia (quietly):\nShh.\n\nOut loud now.\n\n**Mia** (whispering)\nPsst.", cast=["Mia"])
+        self.assertEqual([(l.speaker, l.note, l.text) for l in parsed.lines], [
+            ("Mia", "quietly", "Shh."), ("Mia", None, "Out loud now."), ("Mia", "whispering", "Psst."),
+        ])
+
+    def test_emphasis_is_still_stripped_from_names_outside_the_cast(self):
+        r = parse_script("_Narrator_: Meanwhile.\n**Brain**: Hi.", cast=["Brain"])
+        self.assertEqual([l.speaker for l in r.lines], ["Narrator", "Brain"])
+        self.assertEqual(r.unknown_speakers, ["Narrator"])
+
     def test_render_matches_speakers_ignoring_case_and_spacing(self):
         from src.studio.schemas import RenderRequest
 

@@ -181,14 +181,22 @@ def hash_snapshot(dest: Path, attempts: int = 3) -> tuple[str, os.stat_result]:
     raise FileChangedError(f"{dest.name} kept changing while it was being verified; try again.")
 
 
+def _cached_digest(dest: Path, st: os.stat_result) -> Optional[str]:
+    """The cached SHA-256 for the exact file ``st`` describes (size, mtime and file ID), if it
+    was hashed comfortably after its last modification; otherwise None."""
+    entry = _load_cache(Path(dest).parent).get(Path(dest).name)
+    if (entry and (entry.get("size"), entry.get("mtime_ns"), entry.get("ino")) == _identity(st)
+            and st.st_mtime_ns < entry.get("verified_at_ns", 0) - RACY_WINDOW_NS):
+        return entry["sha256"]
+    return None
+
+
 def file_digest(dest: Path, use_cache: bool = True) -> str:
     dest = Path(dest)
     if use_cache:
-        st = dest.stat()
-        entry = _load_cache(dest.parent).get(dest.name)
-        if (entry and (entry.get("size"), entry.get("mtime_ns"), entry.get("ino")) == _identity(st)
-                and st.st_mtime_ns < entry.get("verified_at_ns", 0) - RACY_WINDOW_NS):
-            return entry["sha256"]
+        cached = _cached_digest(dest, dest.stat())
+        if cached is not None:
+            return cached
     digest, snapshot = hash_snapshot(dest)
     _record_digest(dest, digest, snapshot)
     return digest
@@ -204,6 +212,104 @@ def is_verified(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool
     return file_digest(dest, use_cache=use_cache) == expected[1]
 
 
+class DestinationBusyError(PermissionError):
+    """The destination file is in use (being replaced, or locked by another program), so it can't
+    be checked or replaced right now. Unlike a network or disk failure, this is worth retrying."""
+
+
+def _whole_file_readable(f, size: int) -> bool:
+    """Whether no other program holds a lock that would stop reading any part of the open file.
+
+    On Windows, a byte-range lock anywhere in the file makes reads of that range fail, so reading
+    the first byte is not enough. Take (and at once release) a *shared* lock on the whole file
+    without waiting: it is refused exactly when someone holds an exclusive lock on part of it, and
+    other readers' shared locks don't get in its way. Elsewhere, locks are advisory and never stop
+    a read, so the first byte is all there is to check."""
+    if f.read(1) == b"" and size:
+        return False  # shorter than its metadata says: being rewritten
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _Overlapped(ctypes.Structure):
+        _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
+                    ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD), ("hEvent", wintypes.HANDLE)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                    wintypes.DWORD, ctypes.POINTER(_Overlapped)]
+    kernel32.UnlockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                      ctypes.POINTER(_Overlapped)]
+    handle = msvcrt.get_osfhandle(f.fileno())
+    length = max(size, 1)
+    low, high = length & 0xFFFFFFFF, length >> 32
+    overlapped = _Overlapped()
+    lockfile_fail_immediately = 0x1  # and not LOCKFILE_EXCLUSIVE_LOCK: a shared lock
+    if not kernel32.LockFileEx(handle, lockfile_fail_immediately, 0, low, high, ctypes.byref(overlapped)):
+        return False
+    kernel32.UnlockFileEx(handle, 0, low, high, ctypes.byref(overlapped))
+    return True
+
+
+MISSING, INCOMPLETE, READY, DAMAGED, BUSY = "missing", "incomplete", "ready", "damaged", "busy"
+
+
+def verification_state(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool = True,
+                       attempts: int = 3) -> str:
+    """Classify ``dest`` without raising, from one stable snapshot of one open file:
+
+    * ``missing``: nothing is there;
+    * ``incomplete``: the file has the wrong size;
+    * ``ready``: the file can be read and has the pinned size and SHA-256 (no pin: it can be read);
+    * ``damaged``: a completed check of an unchanging file found a checksum mismatch;
+    * ``busy``: the check couldn't finish because the file kept changing or being replaced, was
+      locked by another program, or disappeared after it was seen. This is temporary: check
+      again shortly rather than repairing.
+
+    The size, the cache lookup and the digest all come from the same open handle, and the result
+    only counts if the path still names that file afterwards; otherwise it is retried. Even a
+    cached digest needs the whole file to be readable (no other program's lock on any part of it),
+    so a locked file is never reported ready."""
+    dest = Path(dest)
+    for attempt in range(attempts):
+        cached = None
+        try:
+            f = open(dest, "rb")
+        except FileNotFoundError:
+            return MISSING if attempt == 0 else BUSY  # it was there a moment ago: being replaced
+        except OSError:
+            if dest.is_dir():  # Windows reports opening a folder as "access denied"
+                return MISSING
+            return BUSY  # sharing violation or other lock
+        try:
+            with f:
+                before = os.fstat(f.fileno())
+                if expected is not None and before.st_size != expected[0]:
+                    state, digest, after = INCOMPLETE, None, before
+                else:
+                    if use_cache and expected is not None:
+                        cached = _cached_digest(dest, before)
+                    if cached is not None or expected is None:
+                        # Nothing to hash, but the file must still be readable end to end now.
+                        if not _whole_file_readable(f, before.st_size):
+                            continue
+                        digest, after = cached, before
+                    else:
+                        digest = _hash_open_file(f)
+                        after = os.fstat(f.fileno())
+                    state = READY if expected is None or digest == expected[1] else DAMAGED
+            current = os.stat(dest)
+        except OSError:  # a lock on the contents, or the path vanished after reading
+            continue
+        if _identity(before) == _identity(after) == _identity(current):
+            if digest is not None and cached is None:
+                _record_digest(dest, digest, before)
+            return state
+    return BUSY
+
+
 def _verified_quietly(dest: Path, expected: tuple[int, str]) -> bool:
     """Fresh (uncached) verification that treats "file busy" as not verified yet: on Windows the
     destination can't be opened while another writer is mid-replace."""
@@ -213,6 +319,40 @@ def _verified_quietly(dest: Path, expected: tuple[int, str]) -> bool:
         return False
 
 
+def _is_read_only(path: Path) -> bool:
+    """Windows' read-only attribute: replacing the file is refused until it is cleared."""
+    import stat
+
+    try:
+        return bool(getattr(os.stat(path), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY)
+    except OSError:
+        return False
+
+
+def _held_by_another_program(path: Path) -> bool:
+    """Whether another handle stops ``path`` from being replaced right now (Windows), as opposed to
+    a permission problem: both make ``os.replace`` fail with "access denied". Opening the file for
+    DELETE access while sharing everything changes nothing, and is refused with a sharing violation
+    only when someone else holds it open without allowing deletion."""
+    if sys.platform != "win32":
+        return False  # elsewhere an open file never blocks a rename: a refusal is about permissions
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    delete, share_all, open_existing, normal = 0x00010000, 0x7, 3, 0x80
+    handle = kernel32.CreateFileW(str(path), delete, share_all, None, open_existing, normal, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        sharing_violation, lock_violation = 32, 33
+        return ctypes.get_last_error() in (sharing_violation, lock_violation)
+    kernel32.CloseHandle(handle)
+    return False
+
+
 def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], attempts: int = 10) -> None:
     """Atomically move a verified download into place.
 
@@ -220,17 +360,25 @@ def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], at
     the same moment) is replacing or reading fails with PermissionError. If the destination is
     already fully verified (size and checksum, freshly hashed), the other writer won and our copy
     is redundant; otherwise retry briefly and finally raise, so a damaged file that cannot be
-    replaced is never reported as repaired.
+    replaced is never reported as repaired. The final error is DestinationBusyError only when
+    another program is confirmed to be holding the file; a read-only file or any other permission
+    problem raises the original PermissionError at once, since waiting won't fix it.
     """
     for attempt in range(attempts):
         try:
             os.replace(tmp_path, dest)
             return
-        except PermissionError:
+        except PermissionError as exc:
             if expected is not None and _verified_quietly(dest, expected):
                 tmp_path.unlink(missing_ok=True)
                 return
+            if _is_read_only(dest):
+                raise
             if attempt == attempts - 1:
+                if _held_by_another_program(dest):
+                    raise DestinationBusyError(
+                        13, f"{dest.name} is in use by another program, so it couldn't be replaced",
+                        str(dest)) from exc
                 raise
             time.sleep(0.2)
 
@@ -248,16 +396,24 @@ def download_file(
     ``expected=(size, sha256)`` is given, its size and SHA-256 match too. An existing ``dest``
     is skipped only if it verifies (so truncated or damaged files from older runs are repaired).
 
+    Raises DestinationBusyError only when the destination itself is in use: it can't be checked
+    before downloading, or can't be replaced afterwards. Network, integrity and
+    temporary-file failures raise their own errors.
+
     Args:
         progress: Optional callback ``progress(downloaded_bytes, total_bytes_or_None)`` invoked
             after every chunk. When given, console progress output is suppressed. The callback
             may raise to abort the download; the partial file is removed.
     """
     dest = Path(dest)
-    if not force and is_verified(dest, expected):
+    state = None if force else verification_state(dest, expected)
+    if state == READY:
         if progress is None:
-            print(f"[skip] {dest} ({_format_bytes(dest.stat().st_size)}, verified)")
+            print(f"[skip] {dest} (verified)")
         return
+    if state == BUSY:
+        raise DestinationBusyError(
+            13, f"{dest.name} is being updated or is in use by another program; try again shortly", str(dest))
     if dest.exists() and not force and progress is None:
         print(f"[repair] {dest} is incomplete or damaged; downloading again")
 

@@ -32,6 +32,15 @@ class UserFacingError(Exception):
     """An error whose message is plain-language and actionable (shown as-is in the UI)."""
 
 
+class RetryLaterError(UserFacingError):
+    """A temporary condition (e.g. a model file is being replaced or is locked): the same request
+    should succeed shortly, so nothing needs repairing. The API answers 503 with Retry-After."""
+
+    def __init__(self, message: str, retry_after_s: int = 5):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
 @dataclass
 class Job:
     id: str

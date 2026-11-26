@@ -11,6 +11,7 @@ from unittest import mock
 
 from scripts import download_models as dm
 from src.studio.hardware import models_status
+from tests._file_locks import exclusive_open, range_lock, windows_only
 
 
 class FakeResponse:
@@ -296,6 +297,296 @@ class ChecksumReadinessTests(unittest.TestCase):
             self.assertEqual(status["ready"], 7)
             with self.assertRaisesRegex(UserFacingError, "damaged: SadTalker_V0.0.2_256.safetensors"):
                 check_models(self.dir)
+
+
+class VerificationStateTests(unittest.TestCase):
+    """verification_state(): busy (temporary) vs damaged (needs repair), from one snapshot."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="gladtalker_state_"))
+        self.dest = self.dir / "model.pth"
+        self.data = b"model-bytes" * 100
+        self.expected = (len(self.data), hashlib.sha256(self.data).hexdigest())
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _age(self):
+        past = time.time_ns() - 60 * 1_000_000_000
+        os.utime(self.dest, ns=(past, past))
+
+    def _on_first_path_stat(self, action):
+        """Run ``action`` just before verification re-reads the path's metadata (after it has read
+        the open file), as if another program swapped the file mid-check."""
+        real_stat, done = os.stat, []
+
+        def stat(path, *args, **kwargs):
+            if not done and Path(path) == self.dest:
+                done.append(1)
+                action()
+            return real_stat(path, *args, **kwargs)
+
+        return mock.patch.object(dm.os, "stat", stat)
+
+    def test_states(self):
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.MISSING)
+        self.dest.write_bytes(self.data[:-1])
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.INCOMPLETE)
+        self.dest.write_bytes(b"X" + self.data[1:])
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.DAMAGED)
+        self.dest.write_bytes(self.data)
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        self.assertEqual(dm.verification_state(self.dir, self.expected), dm.MISSING)  # a folder
+
+    def test_replacement_mid_check_is_rechecked_not_reported_incomplete(self):
+        self.dest.write_bytes(self.data[:10])  # a truncated file, about to be replaced by a good one
+        good = self.dir / "good.tmp"
+        good.write_bytes(self.data)
+        with self._on_first_path_stat(lambda: os.replace(good, self.dest)):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+
+    def test_replacement_mid_hash_is_rechecked_not_reported_damaged(self):
+        self.dest.write_bytes(b"X" + self.data[1:])  # same size, bad bytes, about to be replaced
+        good = self.dir / "good.tmp"
+        good.write_bytes(self.data)
+        with self._on_first_path_stat(lambda: os.replace(good, self.dest)):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        self.assertEqual(dm._load_cache(self.dir)[self.dest.name]["sha256"], self.expected[1])
+
+    def test_file_that_disappears_after_it_was_seen_is_busy(self):
+        self.dest.write_bytes(self.data)
+        with self._on_first_path_stat(self.dest.unlink):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.BUSY)
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.MISSING)
+
+    def test_file_that_keeps_changing_is_busy_and_not_cached(self):
+        self.dest.write_bytes(self.data)
+        real_hash, touches = dm._hash_open_file, []
+
+        def hash_then_touch(f):
+            digest = real_hash(f)
+            touches.append(1)
+            stamp = 1_700_000_000_000_000_000 + len(touches) * 1_000_000_000
+            os.utime(self.dest, ns=(stamp, stamp))
+            return digest
+
+        with mock.patch.object(dm, "_hash_open_file", hash_then_touch):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.BUSY)
+        self.assertEqual(len(touches), 3)
+        self.assertNotIn(self.dest.name, dm._load_cache(self.dir))
+
+    def test_cache_hit_still_needs_a_readable_file(self):
+        self.dest.write_bytes(self.data)
+        self._age()
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)  # warms the cache
+        with mock.patch.object(dm, "_hash_open_file") as hasher:
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        hasher.assert_not_called()
+        with mock.patch.object(dm, "open", create=True, side_effect=PermissionError(13, "in use")):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.BUSY)
+
+    @windows_only
+    def test_sharing_violation_after_warming_the_cache_is_busy(self):
+        self.dest.write_bytes(self.data)
+        self._age()
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        with exclusive_open(self.dest):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.BUSY)
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+
+    @windows_only
+    def test_locked_contents_after_warming_the_cache_are_busy(self):
+        import msvcrt
+
+        self.dest.write_bytes(self.data)
+        self._age()
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        with open(self.dest, "rb+") as holder:
+            msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, len(self.data))
+            try:
+                self.assertEqual(dm.verification_state(self.dest, self.expected), dm.BUSY)
+            finally:
+                holder.seek(0)
+                msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, len(self.data))
+
+    @windows_only
+    def test_lock_beyond_the_first_read_after_warming_the_cache_is_busy(self):
+        """A cached digest can't vouch for a file that another program has locked anywhere in it,
+        not just where a first read would land."""
+        self.data = os.urandom(3 * 1024 * 1024)  # bigger than one buffered read
+        self.expected = (len(self.data), hashlib.sha256(self.data).hexdigest())
+        self.dest.write_bytes(self.data)
+        self._age()
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        with range_lock(self.dest, offset=len(self.data) - 4096, length=4096):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.BUSY)
+            self.assertEqual(dm.verification_state(self.dest, self.expected, use_cache=False), dm.BUSY)
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+
+    @windows_only
+    def test_held_file_and_read_only_file_are_told_apart(self):
+        import stat
+
+        self.dest.write_bytes(self.data)
+        self.assertFalse(dm._held_by_another_program(self.dest))
+        with exclusive_open(self.dest):
+            self.assertTrue(dm._held_by_another_program(self.dest))
+        os.chmod(self.dest, stat.S_IREAD)
+        self.addCleanup(os.chmod, self.dest, stat.S_IWRITE | stat.S_IREAD)
+        self.assertTrue(dm._is_read_only(self.dest))
+        self.assertFalse(dm._held_by_another_program(self.dest))
+
+    @windows_only
+    def test_another_readers_shared_lock_does_not_make_a_file_busy(self):
+        self.dest.write_bytes(self.data)
+        self._age()
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        with range_lock(self.dest, offset=0, length=len(self.data), exclusive=False):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+
+
+class DownloadJobTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="gladtalker_job_"))
+        self.data = b"model-bytes" * 100
+        pin = (len(self.data), hashlib.sha256(self.data).hexdigest())
+        self.manifest = [("w/busy.pth", "https://example.invalid/busy"),
+                         ("w/missing.pth", "https://example.invalid/missing")]
+        self.busy = self.root / "w" / "busy.pth"
+        for patcher in (mock.patch("src.studio.hardware.model_manifest", return_value=self.manifest),
+                        mock.patch.dict(dm.MODEL_CHECKSUMS, {rel: pin for rel, _ in self.manifest})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _busy_when(self, condition):
+        """verification_state() reports busy.pth as busy whenever ``condition()`` is true."""
+        real_state = dm.verification_state
+
+        def state(dest, expected, **kw):
+            if Path(dest) == self.busy and condition():
+                return dm.BUSY
+            return real_state(dest, expected, **kw)
+
+        return mock.patch.object(dm, "verification_state", state)
+
+    def _serve(self):
+        return mock.patch.object(dm.urllib.request, "urlopen",
+                                 side_effect=lambda *a, **k: FakeResponse(self.data, len(self.data)))
+
+    def test_busy_file_is_deferred_while_the_missing_one_downloads(self):
+        from src.studio.hardware import download_models
+
+        self.busy.parent.mkdir(parents=True)
+        self.busy.write_bytes(b"X" + self.data[1:])
+        with self._busy_when(lambda: True), self._serve() as urlopen:
+            result = download_models(mock.MagicMock(), root=self.root)
+        self.assertEqual([c.args[0].full_url for c in urlopen.call_args_list], ["https://example.invalid/missing"])
+        self.assertEqual(result["downloaded"], ["w/missing.pth"])
+        self.assertEqual(result["deferred"], ["w/busy.pth"])
+        self.assertIn("busy.pth", result["message"])
+        self.assertNotIn("All models", result["message"])
+        self.assertEqual(self.busy.read_bytes(), b"X" + self.data[1:], "a busy file is left alone")
+
+    def test_destination_held_at_publish_is_deferred(self):
+        from src.studio.hardware import download_models
+
+        real_replace = os.replace
+
+        def replace(src, dst, *args, **kwargs):
+            if Path(dst) == self.busy:  # another program grabbed it while we downloaded
+                raise PermissionError(13, "in use")
+            return real_replace(src, dst, *args, **kwargs)
+
+        with self._serve(), mock.patch.object(dm.os, "replace", replace), mock.patch.object(dm.time, "sleep"),                 mock.patch.object(dm, "_held_by_another_program", lambda path: Path(path) == self.busy):
+            result = download_models(mock.MagicMock(), root=self.root)
+        self.assertEqual(result["deferred"], ["w/busy.pth"])
+        self.assertEqual(result["downloaded"], ["w/missing.pth"])
+        self.assertEqual([p.name for p in self.busy.parent.iterdir() if p.suffix == ".part"], [])
+
+    @windows_only
+    def test_destination_locked_by_another_program_during_download_is_deferred(self):
+        """The lock starts after the pre-download check, so only the publish step can see it."""
+        import contextlib
+
+        from src.studio.hardware import download_models
+
+        self.busy.parent.mkdir(parents=True)
+        damaged = b"X" + self.data[1:]
+        self.busy.write_bytes(damaged)
+        with contextlib.ExitStack() as held:
+            def urlopen(req, *args, **kwargs):
+                if req.full_url.endswith("/busy"):
+                    held.enter_context(exclusive_open(self.busy))
+                return FakeResponse(self.data, len(self.data))
+
+            with mock.patch.object(dm.urllib.request, "urlopen", urlopen), mock.patch.object(dm.time, "sleep"):
+                result = download_models(mock.MagicMock(), root=self.root)
+        self.assertEqual(result["deferred"], ["w/busy.pth"])
+        self.assertEqual(result["downloaded"], ["w/missing.pth"])
+        self.assertEqual(self.busy.read_bytes(), damaged)
+
+    @windows_only
+    def test_read_only_destination_fails_the_job_instead_of_waiting(self):
+        import stat
+
+        from src.studio.hardware import download_models
+        from src.studio.jobs import UserFacingError
+
+        self.busy.parent.mkdir(parents=True)
+        damaged = b"X" + self.data[1:]
+        self.busy.write_bytes(damaged)
+        os.chmod(self.busy, stat.S_IREAD)
+        self.addCleanup(os.chmod, self.busy, stat.S_IWRITE | stat.S_IREAD)
+        with self._serve(), mock.patch.object(dm.time, "sleep") as sleep:
+            with self.assertRaisesRegex(UserFacingError, "isn't allowed to change it.*isn't read-only"):
+                download_models(mock.MagicMock(), root=self.root)
+        sleep.assert_not_called()  # no point retrying a permission problem
+        self.assertEqual(self.busy.read_bytes(), damaged)
+        self.assertEqual(dm.verification_state(self.busy, dm.expected_for("w/busy.pth")), dm.DAMAGED)
+        self.assertEqual([p.name for p in self.busy.parent.iterdir() if p.suffix == ".part"], [])
+
+    def test_unconfirmed_permission_error_at_publish_stays_a_permission_error(self):
+        tmp = self.root / "new.part"
+        tmp.write_bytes(self.data)
+        with mock.patch.object(dm.os, "replace", side_effect=PermissionError(13, "Access is denied")),                 mock.patch.object(dm.time, "sleep"), mock.patch.object(dm, "_held_by_another_program", return_value=False):
+            with self.assertRaises(PermissionError) as caught:
+                dm._publish(tmp, self.busy, None)
+        self.assertNotIsInstance(caught.exception, dm.DestinationBusyError)
+
+    def test_network_failure_is_reported_even_if_the_file_turns_busy_meanwhile(self):
+        """A timeout is a download failure, whatever state the destination is in by then."""
+        from src.studio.hardware import download_models
+        from src.studio.jobs import UserFacingError
+
+        timed_out = []
+
+        def urlopen(*args, **kwargs):
+            timed_out.append(1)  # ...and another program locks the destination at the same moment
+            raise OSError(110, "timed out")
+
+        with self._busy_when(lambda: bool(timed_out)), mock.patch.object(dm.urllib.request, "urlopen", urlopen):
+            with self.assertRaisesRegex(UserFacingError, "Couldn't download busy.pth: timed out"):
+                download_models(mock.MagicMock(), root=self.root)
+
+    def test_download_file_reports_a_busy_destination_as_such(self):
+        self.busy.parent.mkdir(parents=True)
+        self.busy.write_bytes(self.data)
+        with self._busy_when(lambda: True), self._serve() as urlopen:
+            with self.assertRaises(dm.DestinationBusyError):
+                dm.download_file("https://example.invalid/busy", self.busy, progress=lambda d, t: None,
+                                 expected=dm.expected_for("w/busy.pth"))
+        urlopen.assert_not_called()
+
+    def test_a_real_download_failure_is_still_an_error(self):
+        from src.studio.hardware import download_models
+        from src.studio.jobs import UserFacingError
+
+        with mock.patch.object(dm.urllib.request, "urlopen", side_effect=OSError(110, "timed out")):
+            with self.assertRaisesRegex(UserFacingError, "Couldn't download busy.pth"):
+                download_models(mock.MagicMock(), root=self.root)
 
 
 class ManifestTests(unittest.TestCase):

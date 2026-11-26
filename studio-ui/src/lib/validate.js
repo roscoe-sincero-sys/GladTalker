@@ -11,7 +11,15 @@ export function renderProblems(p, { models = null, ffmpeg = null } = {}) {
   const add = (step, fieldId, message) => problems.push({ step, fieldId, message });
 
   if (ffmpeg === false) add('setup', 'setup-heading', 'FFmpeg isn’t installed. See Setup for how to install it.');
-  if (models && !models.complete) add('setup', 'setup-heading', 'Some models aren’t downloaded yet. Choose Download Models in Setup.');
+  if (models && !models.complete) {
+    const outstanding = (models.files ?? []).filter((f) => !f.ready);
+    if (outstanding.length && outstanding.every((f) => f.busy)) {
+      add('setup', 'setup-heading', 'Some models are being updated or are in use by another program. '
+        + 'GladTalker checks them again every few seconds; you can render once they’re free.');
+    } else {
+      add('setup', 'setup-heading', 'Some models aren’t downloaded yet. Choose Download Models in Setup.');
+    }
+  }
 
   if (!p.image) add('cast', 'scene-file', 'Choose a scene image in the Cast step.');
   soundtrackProblems(p, add, { regions: true });

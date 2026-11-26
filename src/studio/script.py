@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 from src.studio.schemas import name_key
 from src.utils.tts_text import TTS_CONTRACTIONS, normalize_tts_text
@@ -38,21 +38,158 @@ _SPEAKER_LINE_RE = re.compile(
 _HAS_LETTER_RE = re.compile(r"[^\W\d_]")
 
 
-def _known_speaker_re(cast: list[str]) -> Optional[re.Pattern]:
-    """Same shape as _SPEAKER_LINE_RE, but the name must be one of the cast (any length, any
-    case, flexible spacing). Tried first so long names like "The Man in the Hat" are recognised
-    instead of being folded into the previous speaker's line. Longest names win."""
-    if not cast:
+_EMPHASIS = ("**", "__", "*", "_")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•>]\s+)?")
+# The end of a label: "<name> (note)" with an optional closing emphasis marker after the note.
+_NOTE_RE = re.compile(r"^(?P<label>.+?)\s*\((?P<note>[^()]{0,60})\)\s*(?P<close>\*\*|__|\*|_)?\s*$")
+# A label is a cast name, possibly after a few leading emphasis markers or spaces, followed by at
+# most this many more non-space characters before its colon: closing emphasis and a "(note)" of
+# up to 60 characters.
+_LABEL_SLACK = 80
+_MAX_LEAD = 8  # leading emphasis markers and spaces a name may follow ("** ", "__", "_")
+_SPACE_OR_WORD_RE = re.compile(r"\s+|\S+")
+
+
+def _collapsed(line: str) -> Iterator[tuple[str, int]]:
+    """``line``'s characters with each run of whitespace as one space (as name_key sees them),
+    each with its index in ``line``. Lazy, so a caller that stops early reads no further."""
+    for m in _SPACE_OR_WORD_RE.finditer(line):
+        if m.group().isspace():
+            yield " ", m.start()
+        else:
+            for k, ch in enumerate(m.group()):
+                yield ch, m.start() + k
+
+
+def _label_window(line: str, cast_keys: Iterable[str]) -> Optional[tuple[str, list[int], bool, list[int]]]:
+    """The part of ``line`` that could hold a cast label, read in one pass, or None if no cast
+    name can start the line.
+
+    Characters are compared, case-folded and with whitespace collapsed, against the cast keys that
+    could still match from each possible start (the first ``_MAX_LEAD`` positions, inside leading
+    emphasis). Reading stops ``_LABEL_SLACK`` non-space characters after the last key still
+    possible, so the work depends on the text that can match, never on the length of the dialogue
+    or of cast names that don't fit. Returns the window (whitespace collapsed), the index in
+    ``line`` of each of its characters, whether it reaches the end of the line, and the window
+    positions where a whole cast name ends (the only places a label's name can end)."""
+    keys = [k for k in dict.fromkeys(cast_keys) if k]
+    out: list[str] = []
+    where: list[int] = []
+    alive: list[tuple[str, int]] = []  # (cast key, characters of it matched so far)
+    ends: list[int] = []
+    in_lead = True
+    slack = None  # non-space characters still allowed once no key can grow any longer
+    for ch, src in _collapsed(line):
+        position = len(out)
+        if in_lead and position < _MAX_LEAD:
+            alive.extend((k, 0) for k in keys)  # a name may start here
+        if ch not in "*_ ":
+            in_lead = False
+        out.append(ch)
+        where.append(src)
+        if alive:
+            folded, still = ch.casefold(), []
+            for key, done in alive:
+                if key.startswith(folded, done):
+                    if done + len(folded) == len(key):
+                        if not ends or ends[-1] != position + 1:
+                            ends.append(position + 1)  # a whole cast name ends here
+                    else:
+                        still.append((key, done + len(folded)))
+            alive = still
+        if alive or in_lead:
+            continue
+        if not ends:
+            return None
+        if slack is None:
+            slack = _LABEL_SLACK
+        if ch != " ":
+            slack -= 1
+            if slack <= 0:
+                return "".join(out), where, where[-1] == len(line) - 1, ends
+    if not ends:
         return None
-    names = sorted({c for c in cast if c.strip()}, key=len, reverse=True)
-    alternatives = "|".join(r"\s+".join(re.escape(part) for part in n.split()) for n in names)
-    return re.compile(
-        r"^\s*(?:[-*•>]\s+)?(?:\*\*|__|\*|_)?\s*"
-        rf"(?P<name>{alternatives})"
-        r"\s*(?:\*\*|__|\*|_)?\s*(?:\((?P<note>[^)]{0,60})\))?\s*(?:\*\*|__|\*|_)?\s*:(?:\*\*|__|\*|_)?"
-        r"\s*(?P<text>.*)$",
-        re.IGNORECASE,
-    )
+    return "".join(out), where, True, ends
+
+
+# What may follow a cast name inside its label: emphasis markers, spaces, and one "(note)".
+_LABEL_TAIL_RE = re.compile(r"[\s*_]*(?:\([^()]{0,60}\))?[\s*_]*")
+
+
+def _cast_line_readings(line: str, cast_keys: Iterable[str]) -> Iterator[tuple[str, tuple[str, ...], Optional[str], Optional[int]]]:
+    """Every way ``line`` could start with a cast member's label, as ``(label, closing markers,
+    note, index of its colon in line, or None)``, longest label first, so a complete cast name
+    that contains a colon or parentheses ("Team: Blue", "Dr. Moss (Guest)") wins over a shorter
+    one:
+
+    1. the whole line, as a screenplay header, first as a name, then as "name (note)";
+    2. at each colon a label can end at, from the last to the first: the part before it as a
+       name, then as "name (note)". The dialogue after the colon is left alone until a label wins.
+
+    Only the window that could hold a cast label is read (see ``_label_window``), with whitespace
+    collapsed, so padding never pushes a label out of reach. A boundary (a colon, or the end of a
+    header line) is only considered where a whole cast name ends just before it, followed by
+    nothing but emphasis, spaces and a note, so each line costs a few label checks however long a
+    cast name keeps matching it."""
+    found = _label_window(line, cast_keys)
+    if found is None:
+        return
+    window, where, whole, ends = found
+    boundaries: set[int] = set()
+    for end in ends:
+        tail = _LABEL_TAIL_RE.match(window, end)
+        boundaries.update(i for i in range(end, tail.end() + 1) if i < len(window) and window[i] == ":")
+        if whole and tail.end() == len(window):
+            boundaries.add(len(window))
+    for i in sorted(boundaries, reverse=True):
+        if i == len(window):  # the whole line, as a screenplay header
+            yield window, (), None, None
+            if m := _NOTE_RE.match(window):
+                yield m.group("label"), (m.group("close"),), m.group("note"), None
+            continue
+        head = window[:i]
+        colon = where[i]
+        after = next((marker for marker in _EMPHASIS if line.startswith(marker, colon + 1)), None)
+        yield head, (after,), None, colon
+        if m := _NOTE_RE.match(head):
+            yield m.group("label"), (m.group("close"), after), m.group("note"), colon
+
+
+def _dialogue_after(line: str, colon: Optional[int]) -> str:
+    """The text after a winning label's colon, without a closing emphasis marker that follows it."""
+    if colon is None:
+        return ""
+    rest = line[colon + 1:]
+    for marker in _EMPHASIS:
+        if rest.startswith(marker):
+            rest = rest[len(marker):]
+            break
+    return rest.strip()
+
+
+def _label_candidates(label: str, closers: Iterable[str] = ()) -> list[str]:
+    """Ways to read a speaker label as a name, most literal first:
+
+    1. the label as typed ("_Crew", "Crew_");
+    2. without one matched pair of emphasis markers, keeping everything inside ("_Crew_" -> "Crew",
+       "**_Crew**" -> "_Crew"), where the closing marker may also come after a parenthetical or
+       the colon ("**Brain:**");
+    3. without any emphasis markers at either end (the old, permissive reading).
+
+    Inline speakers and screenplay headers both use this order, so a label means the same
+    speaker wherever it appears."""
+    label = label.strip()
+    closers = {c for c in closers if c}
+    found = [label]
+    for marker in _EMPHASIS:
+        if not label.startswith(marker):
+            continue
+        if label.endswith(marker) and len(label) > 2 * len(marker):
+            found.append(label[len(marker):-len(marker)].strip())
+        elif marker in closers:
+            found.append(label[len(marker):].strip())
+    found.append(label.strip("*_ ").strip())
+    return [c for c in dict.fromkeys(found) if c]
 
 
 @dataclass
@@ -148,7 +285,18 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     canonical: dict[str, str] = {}
     for c in cast_list:
         canonical.setdefault(name_key(c), c)
-    known_re = _known_speaker_re(cast_list)
+    canonical_cast = set(canonical)  # keys of the cast itself (canonical also learns other names)
+
+    def cast_member(label: str, closers: Iterable[str] = ()) -> Optional[str]:
+        """The cast member a label names, compared with name_key (full Unicode case folding and
+        any spacing, exactly as render matching does), or None."""
+        key = name_key(label)
+        if not any(k in key for k in canonical_cast):  # every reading of a label keeps the name inside
+            return None
+        for candidate in _label_candidates(label, closers):
+            if (key := name_key(candidate)) in canonical_cast:
+                return canonical[key]
+        return None
 
     lines: list[ParsedLine] = []
     pending_speaker: Optional[str] = None
@@ -156,8 +304,11 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     current: Optional[ParsedLine] = None
 
     def canon(name: str) -> str:
-        # A cast member keeps their stored spelling (even "Officer  Mia" with two spaces); other
-        # names are tidied, and their first spelling is reused for later case/space variants.
+        # A cast member keeps their stored spelling (even "Officer  Mia" with two spaces, or
+        # "Crew_" with a literal underscore), so look the name up before tidying it. Other names
+        # lose stray emphasis markers, and their first spelling is reused for later variants.
+        if (stored := canonical.get(name_key(name))) is not None:
+            return stored
         name = re.sub(r"\s+", " ", name.strip().strip("*_").strip())
         return canonical.setdefault(name_key(name), name)
 
@@ -167,13 +318,33 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             current = None  # a blank line ends continuation
             continue
 
-        # Screenplay style: a line that is just a known cast name (optionally with a colon).
-        bare = stripped.strip("*_ ").rstrip(":").strip("*_ ")
-        if cast_list and name_key(bare) in {name_key(c) for c in cast_list}:
-            pending_speaker, pending_note, current = canon(bare), None, None
+        # A cast member's label: "Name: text", "- **Name** (note): text", or a screenplay header
+        # (just the name, optionally with a note or a colon) that sets the speaker, and the note,
+        # for the following lines.
+        # The line as typed is tried first, so a cast name that starts like a list marker
+        # ("- Operator") is that cast member; only then is a leading bullet removed.
+        reading = None
+        if cast_list:
+            bulleted = raw[_BULLET_RE.match(raw).end():].strip()
+            for body in dict.fromkeys((stripped, bulleted)):
+                reading = next(((speaker, note, _dialogue_after(body, colon))
+                                for label, closers, note, colon in _cast_line_readings(body, canonical_cast)
+                                if (speaker := cast_member(label, closers)) is not None), None)
+                if reading is not None:
+                    break
+        if reading is not None:
+            speaker, note, body_text = reading
+            note = note.strip() if note and note.strip() else None
+            if not body_text:
+                pending_speaker, pending_note, current = speaker, note, None
+                continue
+            current = ParsedLine(index=len(lines), speaker=speaker, text=body_text, note=note,
+                                 source_line=lineno)
+            lines.append(current)
+            pending_speaker = None
             continue
 
-        m = (known_re.match(raw) if known_re else None) or _match_speaker_line(raw)
+        m = _match_speaker_line(raw)
         if m:
             speaker = canon(m.group("name"))
             body = m.group("text").strip()
@@ -199,6 +370,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             source_line=lineno,
         )
         lines.append(current)
+        pending_note = None  # a header's "(quietly)" describes the line right after it
 
     lines = [ln for ln in lines if ln.text]
     known = {name_key(c) for c in cast_list}

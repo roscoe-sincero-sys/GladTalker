@@ -192,6 +192,14 @@ class TTSPreviewRequest(_Model):
     semitones: float = Field(0.0, ge=MIN_SEMITONES, le=MAX_SEMITONES)
     tempo: float = Field(1.0, ge=0.5, le=2.0)
 
+    @field_validator("text")
+    @classmethod
+    def _nonblank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Enter some text to preview.")
+        return v
+
 
 class CastDetectRequest(_Model):
     image_path: str = Field(min_length=1)
