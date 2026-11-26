@@ -29,6 +29,7 @@
   let mediaError = $state(''); // the video couldn't be fetched (token mode); Retry
   let captionError = $state(''); // the caption files couldn't be fetched; Retry captions
   let cancelPendingFor = $state(null); // Cancel pressed for this job id; shown until it ends
+  let cancelPressedFor = null; // the followed render the user pressed Cancel on (kept even if the request fails)
   let attachedId = null; // the render this view is following
   let watch = null; // its watcher; closed when the step closes or another render starts
   let destroyed = false;
@@ -86,6 +87,7 @@
   function attach(id) {
     attachedId = id;
     cancelPendingFor = null;
+    cancelPressedFor = null;
     watch?.close();
     watch = null;
     job = null;
@@ -103,9 +105,10 @@
     watch.done.then(
       (final) => {
         if (!mine() || !final) return;
-        // Pressing Cancel on this render is proof it was live, so its ending is news at once; the
-        // lookup is only for a render this view merely attached to (from history or a reload).
-        const news = cancelPendingFor === id || wasRunning;
+        // Pressing Cancel on this render is proof it was live, so its ending is news at once (even
+        // if the Cancel request itself failed); the lookup is only for a render this view merely
+        // attached to (from history or a reload).
+        const news = cancelPressedFor === id || wasRunning;
         // The video loads at once; only the announcement waits for the lookup.
         if (final.state === 'succeeded') loadVideo(final, news);
         else if (final.state === 'failed') whenNews(news, mine, () => announceError(`Render failed: ${final.error || final.message}`));
@@ -186,6 +189,7 @@
   async function cancel() {
     const id = job.id;
     cancelPendingFor = id;
+    cancelPressedFor = id;
     announce('Cancelling the render…');
     try {
       await api.cancelJob(id);

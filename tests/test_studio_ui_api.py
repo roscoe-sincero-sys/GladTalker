@@ -371,6 +371,66 @@ class PreviewRetentionTests(unittest.TestCase):
         self.assertTrue((target / "precious.txt").exists())
         self.assertFalse(store.dir.exists())
 
+    @unittest.skipUnless(os.name == "nt", "the guarantee Windows cleanup relies on")
+    def test_windows_pins_a_locked_engine_folder_so_its_path_cant_be_swapped(self):
+        store = self._store()
+        self._write(store.new_folder("j", self.jobs))
+        with self.assertRaises(PermissionError):
+            os.rename(store.dir, store.dir.with_name("engine-moved000000"))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX: cleanup works relative to an open directory")
+    def test_a_folder_swapped_for_a_link_mid_cleanup_never_redirects_deletion(self):
+        """POSIX lets a folder be renamed while cleanup runs; listing and deleting go through the
+        directory that was opened and checked, so a link put in its place is never followed."""
+        from src.studio import previews
+
+        target = self._outside_folder_with_a_stale_marker()
+        dead = PreviewStore(self.root, stale_s=0)
+        folder = self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()
+        dead._lock = None
+        self._age_marker(dead)
+        moved = dead.dir.with_name("engine-moved000000")
+        real_listdir, swapped = os.listdir, []
+
+        def swap_then_list(path=None):
+            if isinstance(path, int) and not swapped:  # the first listing of the opened folder
+                swapped.append(1)
+                os.rename(dead.dir, moved)
+                os.symlink(target, dead.dir, target_is_directory=True)
+            return real_listdir(path) if path is not None else real_listdir()
+
+        with mock.patch.object(previews.os, "listdir", swap_then_list):
+            self._store(stale_s=60).new_folder("b", self.jobs)
+        self.assertTrue(swapped)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue((target / ".owner.lock").exists())
+        self.assertTrue(dead.dir.is_symlink(), "the link itself is left alone")
+        self.assertFalse((moved / folder.name).exists(), "the checked folder's previews were deleted")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX: cleanup works relative to an open directory")
+    def test_a_folder_swapped_for_a_link_before_it_is_opened_is_left_alone(self):
+        from src.studio import previews
+
+        target = self._outside_folder_with_a_stale_marker()
+        dead = PreviewStore(self.root, stale_s=0)
+        self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()
+        dead._lock = None
+        self._age_marker(dead)
+        original = previews._FileLock.acquire
+
+        def swap_then_acquire(lock, *args, **kwargs):
+            if lock.path.parent == dead.dir and not dead.dir.is_symlink():
+                os.rename(dead.dir, dead.dir.with_name("engine-moved000000"))
+                os.symlink(target, dead.dir, target_is_directory=True)
+            return original(lock, *args, **kwargs)
+
+        with mock.patch.object(previews._FileLock, "acquire", swap_then_acquire):
+            self._store(stale_s=60).new_folder("b", self.jobs)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue((target / ".owner.lock").exists())
+
     def test_nothing_is_deleted_if_the_folder_or_marker_changed_once_locked(self):
         from src.studio import previews
 
