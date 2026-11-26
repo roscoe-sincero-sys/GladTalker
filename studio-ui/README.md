@@ -69,7 +69,7 @@ Inside that folder it uses Python from `venv-dml`, `venv`, or `.venv`, in that o
 
 ### Building the desktop app
 
-You need Node, plus [Rust](https://rustup.rs/) and the platform prerequisites for Tauri. On Windows that means the Microsoft C++ Build Tools ("Desktop development with C++") and WebView2, which comes with Windows 11.
+You need Node, plus [Rust](https://rustup.rs/) 1.90 or newer (what the locked Tauri 2.12 crates require; `rustup update` gets the latest) and the platform prerequisites for Tauri. On Windows that means the Microsoft C++ Build Tools ("Desktop development with C++") and WebView2, which comes with Windows 11.
 
 ```bash
 cd studio-ui

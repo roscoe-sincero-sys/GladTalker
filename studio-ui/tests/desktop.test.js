@@ -114,6 +114,38 @@ describe('starting the engine from the desktop app', () => {
     unmount();
   });
 
+  it('asks to choose an older picked checkout again once updated, since Try again wouldn’t use it', async () => {
+    // What choose_engine_folder reports for a picked Phase 2 checkout (engine::check_chosen_folder).
+    const message = 'The GladTalker folder D:/picked-old is older than this app: its studio_server.py doesn’t support '
+      + '--exit-with-parent. Update that folder (for example with “git pull”, then reinstall its requirements), then '
+      + 'choose it again with Choose GladTalker folder…, or choose a newer GladTalker folder.';
+    let updated = false;
+    let started = false; // once a good folder is chosen, the shell keeps using it
+    const calls = shell({
+      start_engine: () => (started ? READY
+        : { state: 'not_found', message: 'Choose where it is.', folder: null, choose_again: false }),
+      choose_engine_folder: () => {
+        if (!updated) return { state: 'not_found', message, folder: 'D:/picked-old', choose_again: true };
+        started = true;
+        return READY;
+      },
+    });
+    engineFetch();
+    await connectEngine();
+    await chooseEngineFolder();
+    expect(engine.status).toBe('setup');
+    const { container, unmount } = render(EngineSetup);
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull(); // a fresh search wouldn't find it
+    expect(await violations(container)).toEqual([]);
+
+    updated = true; // the user updated that checkout, then follows the message
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose GladTalker folder…' }));
+    await vi.waitFor(() => expect(engine.status).toBe('ready'));
+    expect(calls.map((c) => c[0])).toEqual(['start_engine', 'choose_engine_folder', 'choose_engine_folder', 'start_engine']);
+    unmount();
+  });
+
   it('passes on a note from the shell (say, the chosen folder couldn’t be remembered)', async () => {
     shell({ start_engine: { ...READY, note: 'GladTalker Studio couldn’t remember this folder for next time (denied).' } });
     engineFetch();
