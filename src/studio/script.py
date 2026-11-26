@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 from src.studio.schemas import name_key
 from src.utils.tts_text import TTS_CONTRACTIONS, normalize_tts_text
@@ -40,12 +40,31 @@ _HAS_LETTER_RE = re.compile(r"[^\W\d_]")
 
 _EMPHASIS = ("**", "__", "*", "_")
 _BULLET_RE = re.compile(r"^\s*(?:[-*•>]\s+)?")
-# "<label> (note)<closing emphasis>:<closing emphasis> text"; the label is everything before the
-# colon (or the parenthetical), so a cast name is compared whole, never by prefix.
-_LABELLED_RE = re.compile(
-    r"^(?P<label>[^:()]+)(?:\((?P<note>[^)]{0,60})\))?\s*(?P<close>\*\*|__|\*|_)?\s*:"
-    r"(?P<after>\*\*|__|\*|_)?\s*(?P<text>.*)$"
-)
+# The end of a label: "<name> (note)" with an optional closing emphasis marker after the note.
+_NOTE_RE = re.compile(r"^(?P<label>.+?)\s*\((?P<note>[^()]{0,60})\)\s*(?P<close>\*\*|__|\*|_)?\s*$")
+_AFTER_COLON_RE = re.compile(r"^(?P<after>\*\*|__|\*|_)?\s*(?P<text>.*)$", re.DOTALL)
+
+
+def _cast_line_readings(line: str) -> Iterator[tuple[str, tuple[str, ...], Optional[str], str]]:
+    """Every way ``line`` (bullet already removed) could start with a speaker label, as
+    ``(label, closing markers, note, text)``, longest label first, so a complete cast name that
+    contains a colon or parentheses ("Team: Blue", "Dr. Moss (Guest)") wins over a shorter one:
+
+    1. the whole line, as a screenplay header (empty text), first as a name, then as
+       "name (note)";
+    2. at each colon from the last to the first: the part before it as a name, then as
+       "name (note)", with the rest of the line as the text."""
+    yield line, (), None, ""
+    if m := _NOTE_RE.match(line):
+        yield m.group("label"), (m.group("close"),), m.group("note"), ""
+    colons = [i for i, ch in enumerate(line) if ch == ":"]
+    for i in reversed(colons):
+        head = line[:i]
+        rest = _AFTER_COLON_RE.match(line[i + 1:])
+        after, text = rest.group("after"), rest.group("text").strip()
+        yield head, (after,), None, text
+        if m := _NOTE_RE.match(head):
+            yield m.group("label"), (m.group("close"), after), m.group("note"), text
 
 
 def _label_candidates(label: str, closers: Iterable[str] = ()) -> list[str]:
@@ -197,19 +216,21 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             continue
 
         # A cast member's label: "Name: text", "- **Name** (note): text", or a screenplay header
-        # (just the name, optionally with a colon) that sets the speaker for the following lines.
-        labelled = _LABELLED_RE.match(raw[_BULLET_RE.match(raw).end():]) if cast_list else None
-        if labelled:
-            speaker = cast_member(labelled.group("label"), (labelled.group("close"), labelled.group("after")))
-        else:
-            speaker = cast_member(stripped) if cast_list and ":" not in stripped else None
-        if speaker is not None and not (labelled and labelled.group("text").strip()):
-            pending_speaker, pending_note, current = speaker, None, None
-            continue
-        if speaker is not None:
-            note = labelled.group("note")
-            current = ParsedLine(index=len(lines), speaker=speaker, text=labelled.group("text").strip(),
-                                 note=note.strip() if note else None, source_line=lineno)
+        # (just the name, optionally with a note or a colon) that sets the speaker, and the note,
+        # for the following lines.
+        reading = None
+        if cast_list:
+            body = raw[_BULLET_RE.match(raw).end():].strip()
+            reading = next(((speaker, note, text) for label, closers, note, text in _cast_line_readings(body)
+                            if (speaker := cast_member(label, closers)) is not None), None)
+        if reading is not None:
+            speaker, note, body_text = reading
+            note = note.strip() if note and note.strip() else None
+            if not body_text:
+                pending_speaker, pending_note, current = speaker, note, None
+                continue
+            current = ParsedLine(index=len(lines), speaker=speaker, text=body_text, note=note,
+                                 source_line=lineno)
             lines.append(current)
             pending_speaker = None
             continue
@@ -240,6 +261,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             source_line=lineno,
         )
         lines.append(current)
+        pending_note = None  # a header's "(quietly)" describes the line right after it
 
     lines = [ln for ln in lines if ln.text]
     known = {name_key(c) for c in cast_list}

@@ -420,11 +420,13 @@ def render(ctx: JobContext, req: RenderRequest, out_dir: Path, tts: TTSService, 
                             stage=stage, force=(done == total), character=name, frame=shown, frames=frames)
 
             t_r = time.perf_counter()
-            recheck = partial(check_models, quality_mode=req.quality.mode, size=req.quality.size, use_cache=False)
-            with explain_load_failure(recheck), report_progress(hook), retinaface_fallback():
-                video = inference.main(_sadtalker_args(
-                    tile_path, audio.speaker_wavs[name], str(work_dir / f"{safe}_sadtalker"), device, req
-                ))
+            args = _sadtalker_args(tile_path, audio.speaker_wavs[name], str(work_dir / f"{safe}_sadtalker"), device, req)
+            # Only SadTalker's model loading is explained by rechecking the checkpoints; encoder,
+            # disk and other later failures keep their own messages.
+            args.model_load_guard = explain_load_failure(
+                partial(check_models, quality_mode=req.quality.mode, size=req.quality.size, use_cache=False))
+            with report_progress(hook), retinaface_fallback():
+                video = inference.main(args)
             if not video or not os.path.isfile(video):
                 raise UserFacingError(
                     f"No face was detected in {name}'s region. Try Expand to Tile so the whole head "

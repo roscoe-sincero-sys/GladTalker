@@ -200,6 +200,12 @@ def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False
             continue
         except DownloadIntegrityError as exc:
             raise UserFacingError(str(exc)) from exc
+        except PermissionError as exc:  # e.g. a read-only model file or folder: waiting won't help
+            raise UserFacingError(
+                f"Couldn't replace {name}: GladTalker isn't allowed to change it "
+                f"({exc.strerror or exc}). Make sure the file isn't read-only and that you can write "
+                f"to {Path(root, rel).parent}, then choose Download Models again."
+            ) from exc
         except OSError as exc:  # URLError, timeouts, disk full, temporary-file problems...
             reason = getattr(exc, "reason", None) or exc.strerror or exc
             raise UserFacingError(

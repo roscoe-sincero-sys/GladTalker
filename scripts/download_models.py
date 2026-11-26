@@ -319,6 +319,40 @@ def _verified_quietly(dest: Path, expected: tuple[int, str]) -> bool:
         return False
 
 
+def _is_read_only(path: Path) -> bool:
+    """Windows' read-only attribute: replacing the file is refused until it is cleared."""
+    import stat
+
+    try:
+        return bool(getattr(os.stat(path), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY)
+    except OSError:
+        return False
+
+
+def _held_by_another_program(path: Path) -> bool:
+    """Whether another handle stops ``path`` from being replaced right now (Windows), as opposed to
+    a permission problem: both make ``os.replace`` fail with "access denied". Opening the file for
+    DELETE access while sharing everything changes nothing, and is refused with a sharing violation
+    only when someone else holds it open without allowing deletion."""
+    if sys.platform != "win32":
+        return False  # elsewhere an open file never blocks a rename: a refusal is about permissions
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    delete, share_all, open_existing, normal = 0x00010000, 0x7, 3, 0x80
+    handle = kernel32.CreateFileW(str(path), delete, share_all, None, open_existing, normal, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        sharing_violation, lock_violation = 32, 33
+        return ctypes.get_last_error() in (sharing_violation, lock_violation)
+    kernel32.CloseHandle(handle)
+    return False
+
+
 def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], attempts: int = 10) -> None:
     """Atomically move a verified download into place.
 
@@ -326,19 +360,26 @@ def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], at
     the same moment) is replacing or reading fails with PermissionError. If the destination is
     already fully verified (size and checksum, freshly hashed), the other writer won and our copy
     is redundant; otherwise retry briefly and finally raise, so a damaged file that cannot be
-    replaced is never reported as repaired.
+    replaced is never reported as repaired. The final error is DestinationBusyError only when
+    another program is confirmed to be holding the file; a read-only file or any other permission
+    problem raises the original PermissionError at once, since waiting won't fix it.
     """
     for attempt in range(attempts):
         try:
             os.replace(tmp_path, dest)
             return
-        except PermissionError:
+        except PermissionError as exc:
             if expected is not None and _verified_quietly(dest, expected):
                 tmp_path.unlink(missing_ok=True)
                 return
+            if _is_read_only(dest):
+                raise
             if attempt == attempts - 1:
-                raise DestinationBusyError(
-                    13, f"{dest.name} is in use by another program, so it couldn't be replaced", str(dest))
+                if _held_by_another_program(dest):
+                    raise DestinationBusyError(
+                        13, f"{dest.name} is in use by another program, so it couldn't be replaced",
+                        str(dest)) from exc
+                raise
             time.sleep(0.2)
 
 

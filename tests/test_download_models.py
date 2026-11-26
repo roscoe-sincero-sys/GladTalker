@@ -424,6 +424,19 @@ class VerificationStateTests(unittest.TestCase):
         self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
 
     @windows_only
+    def test_held_file_and_read_only_file_are_told_apart(self):
+        import stat
+
+        self.dest.write_bytes(self.data)
+        self.assertFalse(dm._held_by_another_program(self.dest))
+        with exclusive_open(self.dest):
+            self.assertTrue(dm._held_by_another_program(self.dest))
+        os.chmod(self.dest, stat.S_IREAD)
+        self.addCleanup(os.chmod, self.dest, stat.S_IWRITE | stat.S_IREAD)
+        self.assertTrue(dm._is_read_only(self.dest))
+        self.assertFalse(dm._held_by_another_program(self.dest))
+
+    @windows_only
     def test_another_readers_shared_lock_does_not_make_a_file_busy(self):
         self.dest.write_bytes(self.data)
         self._age()
@@ -477,7 +490,7 @@ class DownloadJobTests(unittest.TestCase):
         self.assertNotIn("All models", result["message"])
         self.assertEqual(self.busy.read_bytes(), b"X" + self.data[1:], "a busy file is left alone")
 
-    def test_destination_locked_at_publish_is_deferred(self):
+    def test_destination_held_at_publish_is_deferred(self):
         from src.studio.hardware import download_models
 
         real_replace = os.replace
@@ -487,12 +500,61 @@ class DownloadJobTests(unittest.TestCase):
                 raise PermissionError(13, "in use")
             return real_replace(src, dst, *args, **kwargs)
 
-        with self._serve(), mock.patch.object(dm.os, "replace", replace), mock.patch.object(dm.time, "sleep"):
+        with self._serve(), mock.patch.object(dm.os, "replace", replace), mock.patch.object(dm.time, "sleep"),                 mock.patch.object(dm, "_held_by_another_program", lambda path: Path(path) == self.busy):
             result = download_models(mock.MagicMock(), root=self.root)
         self.assertEqual(result["deferred"], ["w/busy.pth"])
         self.assertEqual(result["downloaded"], ["w/missing.pth"])
-        self.assertFalse(self.busy.exists())
         self.assertEqual([p.name for p in self.busy.parent.iterdir() if p.suffix == ".part"], [])
+
+    @windows_only
+    def test_destination_locked_by_another_program_during_download_is_deferred(self):
+        """The lock starts after the pre-download check, so only the publish step can see it."""
+        import contextlib
+
+        from src.studio.hardware import download_models
+
+        self.busy.parent.mkdir(parents=True)
+        damaged = b"X" + self.data[1:]
+        self.busy.write_bytes(damaged)
+        with contextlib.ExitStack() as held:
+            def urlopen(req, *args, **kwargs):
+                if req.full_url.endswith("/busy"):
+                    held.enter_context(exclusive_open(self.busy))
+                return FakeResponse(self.data, len(self.data))
+
+            with mock.patch.object(dm.urllib.request, "urlopen", urlopen), mock.patch.object(dm.time, "sleep"):
+                result = download_models(mock.MagicMock(), root=self.root)
+        self.assertEqual(result["deferred"], ["w/busy.pth"])
+        self.assertEqual(result["downloaded"], ["w/missing.pth"])
+        self.assertEqual(self.busy.read_bytes(), damaged)
+
+    @windows_only
+    def test_read_only_destination_fails_the_job_instead_of_waiting(self):
+        import stat
+
+        from src.studio.hardware import download_models
+        from src.studio.jobs import UserFacingError
+
+        self.busy.parent.mkdir(parents=True)
+        damaged = b"X" + self.data[1:]
+        self.busy.write_bytes(damaged)
+        os.chmod(self.busy, stat.S_IREAD)
+        self.addCleanup(os.chmod, self.busy, stat.S_IWRITE | stat.S_IREAD)
+        with self._serve(), mock.patch.object(dm.time, "sleep") as sleep:
+            with self.assertRaisesRegex(UserFacingError, "isn't allowed to change it.*isn't read-only"):
+                download_models(mock.MagicMock(), root=self.root)
+        sleep.assert_not_called()  # no point retrying a permission problem
+        self.assertEqual(self.busy.read_bytes(), damaged)
+        self.assertEqual(dm.verification_state(self.busy, dm.expected_for("w/busy.pth")), dm.DAMAGED)
+        self.assertEqual([p.name for p in self.busy.parent.iterdir() if p.suffix == ".part"], [])
+
+    def test_unconfirmed_permission_error_at_publish_stays_a_permission_error(self):
+        tmp = self.root / "new.part"
+        tmp.write_bytes(self.data)
+        with mock.patch.object(dm.os, "replace", side_effect=PermissionError(13, "Access is denied")),                 mock.patch.object(dm.time, "sleep"), mock.patch.object(dm, "_held_by_another_program", return_value=False):
+            with self.assertRaises(PermissionError) as caught:
+                dm._publish(tmp, self.busy, None)
+        self.assertNotIsInstance(caught.exception, dm.DestinationBusyError)
 
     def test_network_failure_is_reported_even_if_the_file_turns_busy_meanwhile(self):
         """A timeout is a download failure, whatever state the destination is in by then."""

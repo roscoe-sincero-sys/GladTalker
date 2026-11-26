@@ -1,3 +1,4 @@
+import contextlib
 from glob import glob
 import shutil
 import torch
@@ -36,11 +37,14 @@ def main(args):
     sadtalker_paths = init_path(args.checkpoint_dir, os.path.join(current_root_path, 'src/config'), args.size, args.old_version, args.preprocess)
 
     #init model
-    preprocess_model = CropAndExtract(sadtalker_paths, device)
+    # Callers may pass a context manager that wraps only this model loading (GladTalker Studio
+    # explains a checkpoint that became busy or damaged); later failures keep their own messages.
+    with getattr(args, 'model_load_guard', None) or contextlib.nullcontext():
+        preprocess_model = CropAndExtract(sadtalker_paths, device)
 
-    audio_to_coeff = Audio2Coeff(sadtalker_paths,  device)
-    
-    animate_from_coeff = AnimateFromCoeff(sadtalker_paths, device)
+        audio_to_coeff = Audio2Coeff(sadtalker_paths,  device)
+
+        animate_from_coeff = AnimateFromCoeff(sadtalker_paths, device)
 
     #crop image and extract 3dmm from image
     first_frame_dir = os.path.join(save_dir, 'first_frame_dir')

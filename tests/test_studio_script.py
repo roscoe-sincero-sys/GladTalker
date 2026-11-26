@@ -147,6 +147,27 @@ class ParseScriptTests(unittest.TestCase):
         self.assertEqual(parsed.unknown_speakers, [])
         self.assertEqual(self._render_speakers(cast, parsed), expected)
 
+    def test_cast_names_with_parentheses_or_colons_beat_their_shorter_prefix(self):
+        """A complete cast label wins over a shorter cast name before "(" or ":" is read as a note
+        or separator; a parenthetical that isn't part of a name is still the note."""
+        cast = ["Dr. Moss", "Dr. Moss (Guest)", "Team", "Team: Blue"]
+        parsed = parse_script("Dr. Moss (Guest): Ready.\nDr. Moss: Hi.\nDr. Moss (nervous): Um.\n"
+                              "Team: Blue: Ready.\nTeam: Go.\n**Team: Blue**: Bold.\nTeam: Blue\nWe win.\n\n"
+                              "DR. MOSS (GUEST)\nAs a header.", cast=cast)
+        expected = [("Dr. Moss (Guest)", "Ready."), ("Dr. Moss", "Hi."), ("Dr. Moss", "Um."),
+                    ("Team: Blue", "Ready."), ("Team", "Go."), ("Team: Blue", "Bold."),
+                    ("Team: Blue", "We win."), ("Dr. Moss (Guest)", "As a header.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual([l.note for l in parsed.lines], [None, None, "nervous", None, None, None, None, None])
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_a_headers_note_goes_with_the_line_after_it(self):
+        parsed = parse_script("Mia (quietly):\nShh.\n\nOut loud now.\n\n**Mia** (whispering)\nPsst.", cast=["Mia"])
+        self.assertEqual([(l.speaker, l.note, l.text) for l in parsed.lines], [
+            ("Mia", "quietly", "Shh."), ("Mia", None, "Out loud now."), ("Mia", "whispering", "Psst."),
+        ])
+
     def test_emphasis_is_still_stripped_from_names_outside_the_cast(self):
         r = parse_script("_Narrator_: Meanwhile.\n**Brain**: Hi.", cast=["Brain"])
         self.assertEqual([l.speaker for l in r.lines], ["Narrator", "Brain"])
