@@ -4,6 +4,7 @@ name: Preview cleanup (Linux, macOS)
 
 on:
   push:
+    branches: [main]  # pull requests are covered below; this avoids running twice
     paths:
       - src/studio/previews.py
       - tests/test_studio_ui_api.py
