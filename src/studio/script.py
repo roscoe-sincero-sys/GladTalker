@@ -38,21 +38,33 @@ _SPEAKER_LINE_RE = re.compile(
 _HAS_LETTER_RE = re.compile(r"[^\W\d_]")
 
 
-def _known_speaker_re(cast: list[str]) -> Optional[re.Pattern]:
-    """Same shape as _SPEAKER_LINE_RE, but the name must be one of the cast (any length, any
-    case, flexible spacing). Tried first so long names like "The Man in the Hat" are recognised
-    instead of being folded into the previous speaker's line. Longest names win."""
+_EMPH = r"(?:\*\*|__|\*|_)?"
+
+
+def _known_speaker_res(cast: list[str]) -> tuple[Optional[re.Pattern], Optional[re.Pattern]]:
+    """Patterns for lines that name a cast member (any length, any case, flexible spacing).
+
+    The first has the same shape as _SPEAKER_LINE_RE but the name must be one of the cast; it is
+    tried first so long names like "The Man in the Hat" are recognised instead of being folded
+    into the previous speaker's line. The second matches a line that is only a cast name
+    (screenplay style, optionally emphasised and/or followed by a colon). Longest names win, and
+    a name's own underscores (``Crew_``) are kept rather than read as Markdown emphasis."""
     if not cast:
-        return None
+        return None, None
     names = sorted({c for c in cast if c.strip()}, key=len, reverse=True)
     alternatives = "|".join(r"\s+".join(re.escape(part) for part in n.split()) for n in names)
-    return re.compile(
-        r"^\s*(?:[-*•>]\s+)?(?:\*\*|__|\*|_)?\s*"
+    speaker_re = re.compile(
+        rf"^\s*(?:[-*•>]\s+)?{_EMPH}\s*"
         rf"(?P<name>{alternatives})"
-        r"\s*(?:\*\*|__|\*|_)?\s*(?:\((?P<note>[^)]{0,60})\))?\s*(?:\*\*|__|\*|_)?\s*:(?:\*\*|__|\*|_)?"
+        rf"\s*{_EMPH}\s*(?:\((?P<note>[^)]{{0,60}})\))?\s*{_EMPH}\s*:{_EMPH}"
         r"\s*(?P<text>.*)$",
         re.IGNORECASE,
     )
+    bare_re = re.compile(
+        rf"^\s*{_EMPH}\s*(?P<name>{alternatives})\s*{_EMPH}\s*:?\s*{_EMPH}\s*$",
+        re.IGNORECASE,
+    )
+    return speaker_re, bare_re
 
 
 @dataclass
@@ -148,7 +160,7 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     canonical: dict[str, str] = {}
     for c in cast_list:
         canonical.setdefault(name_key(c), c)
-    known_re = _known_speaker_re(cast_list)
+    known_re, known_bare_re = _known_speaker_res(cast_list)
 
     lines: list[ParsedLine] = []
     pending_speaker: Optional[str] = None
@@ -156,8 +168,11 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     current: Optional[ParsedLine] = None
 
     def canon(name: str) -> str:
-        # A cast member keeps their stored spelling (even "Officer  Mia" with two spaces); other
-        # names are tidied, and their first spelling is reused for later case/space variants.
+        # A cast member keeps their stored spelling (even "Officer  Mia" with two spaces, or
+        # "Crew_" with a literal underscore), so look the name up before tidying it. Other names
+        # lose stray emphasis markers, and their first spelling is reused for later variants.
+        if (stored := canonical.get(name_key(name))) is not None:
+            return stored
         name = re.sub(r"\s+", " ", name.strip().strip("*_").strip())
         return canonical.setdefault(name_key(name), name)
 
@@ -168,9 +183,9 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             continue
 
         # Screenplay style: a line that is just a known cast name (optionally with a colon).
-        bare = stripped.strip("*_ ").rstrip(":").strip("*_ ")
-        if cast_list and name_key(bare) in {name_key(c) for c in cast_list}:
-            pending_speaker, pending_note, current = canon(bare), None, None
+        bare = known_bare_re.match(raw) if known_bare_re else None
+        if bare:
+            pending_speaker, pending_note, current = canon(bare.group("name")), None, None
             continue
 
         m = (known_re.match(raw) if known_re else None) or _match_speaker_line(raw)

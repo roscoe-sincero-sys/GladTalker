@@ -17,6 +17,8 @@ from src.studio.faces import FaceBox
 from src.studio.jobs import JobManager
 from src.studio.server import DEFAULT_HOSTS, DEFAULT_ORIGINS, StudioConfig, StudioServices, create_app
 
+REAL_CHECK_MODELS = pipeline.check_models  # setUp stubs it out for most tests
+
 
 class FakeTTS:
     def preview(self, text, semitones=0.0, tempo=1.0, ffmpeg=None):
@@ -121,6 +123,14 @@ class StudioServerTests(unittest.TestCase):
     def test_tts_preview_validates(self):
         self.assertEqual(self.client.post("/tts/preview", json={"text": "", "semitones": 0}).status_code, 422)
         self.assertEqual(self.client.post("/tts/preview", json={"text": "Hi", "semitones": 9}).status_code, 422)
+
+    def test_tts_preview_rejects_whitespace_only_text(self):
+        self.services.tts.last = None
+        with mock.patch("src.studio.server.find_ffmpeg", return_value="ffmpeg"):
+            r = self.client.post("/tts/preview", json={"text": "  \t\n "})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("Enter some text to preview", r.text)
+        self.assertIsNone(self.services.tts.last)
 
     def test_tts_preview_without_ffmpeg(self):
         with mock.patch("src.studio.server.find_ffmpeg", return_value=None):
@@ -367,6 +377,99 @@ class StudioServerTests(unittest.TestCase):
             self.assertEqual(r.status_code, 413)
         uploads = self.tmp / "ws3" / "uploads"
         self.assertTrue(not uploads.exists() or not any(uploads.iterdir()))
+
+    # -- model verification: temporary (file changing / locked) vs damaged --------------------
+    DETECTOR_REL = "gfpgan/weights/detection_Resnet50_Final.pth"
+
+    def _install_models(self):
+        """Every model file under a temp root, pinned to its (tiny) contents."""
+        import hashlib
+
+        from scripts import download_models as dm
+        from src.studio.faces import FaceDetectorService
+        from src.studio.hardware import models_status
+
+        root = self.tmp / "models_root"
+        data = b"weights" * 64
+        pins = {}
+        for rel, _ in dm.MODELS:
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(data)
+            pins[rel] = (len(data), hashlib.sha256(data).hexdigest())
+        self.services.detector = FaceDetectorService(model_root=str(root / "gfpgan" / "weights"))
+        # /models and the render precheck read this root instead of the repository's.
+        for patcher in (mock.patch.dict(dm.MODEL_CHECKSUMS, pins),
+                        mock.patch("src.studio.server.models_status", lambda: models_status(root)),
+                        mock.patch.object(pipeline, "check_models", lambda **kw: REAL_CHECK_MODELS(root, **kw))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return root
+
+    def _changing_while_hashed(self, rel_name):
+        """Make verification of ``rel_name`` exhaust its retries (the file keeps changing)."""
+        from scripts import download_models as dm
+
+        real = dm.hash_snapshot
+
+        def flaky(dest, attempts=3):
+            if Path(dest).name == rel_name:
+                raise dm.FileChangedError(f"{rel_name} kept changing while it was being verified; try again.")
+            return real(dest, attempts)
+
+        return mock.patch.object(dm, "hash_snapshot", flaky)
+
+    def test_changing_checkpoint_is_busy_not_damaged(self):
+        self._install_models()
+        with self._changing_while_hashed("detection_Resnet50_Final.pth"),                 mock.patch("facexlib.detection.init_detection_model") as init:
+            status = self.client.get("/models").json()
+            entry = next(f for f in status["files"] if f["path"] == self.DETECTOR_REL)
+            self.assertEqual((entry["state"], entry["busy"], entry["damaged"], entry["ready"]),
+                             ("busy", True, False, False))
+            self.assertEqual((status["busy"], status["ready"], status["complete"]), (1, 7, False))
+
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertEqual(r.headers["retry-after"], "5")
+            self.assertTrue(r.json()["retryable"])
+            self.assertIn("Try Auto-Cast again in a moment", r.json()["detail"])
+
+            r = self.client.post("/render/start", json=_render_body(self.image))
+            self.assertEqual(r.status_code, 503, r.text)
+            self.assertEqual(r.headers["retry-after"], "5")
+            self.assertIn("detection_Resnet50_Final.pth", r.json()["detail"])
+            self.assertIn("Try again in a moment", r.json()["detail"])
+        init.assert_not_called()
+        self.assertEqual(self.client.get("/jobs").json()["jobs"], [])
+        # Once the file settles it verifies normally.
+        self.assertTrue(self.client.get("/models").json()["complete"])
+
+    def test_locked_checkpoint_is_busy_not_damaged(self):
+        self._install_models()
+        from scripts import download_models as dm
+
+        with mock.patch.object(dm, "hash_snapshot", side_effect=PermissionError(13, "in use")):
+            status = self.client.get("/models").json()
+            self.assertEqual(status["busy"], 8)
+            self.assertFalse(any(f["damaged"] for f in status["files"]))
+            self.assertEqual(self.client.post("/render/start", json=_render_body(self.image)).status_code, 503)
+
+    def test_checksum_mismatch_is_damaged(self):
+        root = self._install_models()
+        path = root / self.DETECTOR_REL
+        path.write_bytes(b"X" + path.read_bytes()[1:])  # same size, different bytes
+        status = self.client.get("/models").json()
+        entry = next(f for f in status["files"] if f["path"] == self.DETECTOR_REL)
+        self.assertEqual((entry["state"], entry["damaged"], entry["busy"]), ("damaged", True, False))
+        self.assertEqual(status["busy"], 0)
+
+        r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("incomplete or damaged", r.json()["detail"])
+        self.assertNotIn("retry-after", r.headers)
+
+        r = self.client.post("/render/start", json=_render_body(self.image))
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("damaged: detection_Resnet50_Final.pth", r.json()["detail"])
 
     def test_model_download_admission_is_atomic(self):
         gate = threading.Event()

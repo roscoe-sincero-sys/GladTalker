@@ -105,6 +105,9 @@ For pre-fork SadTalker history (`v0.0.2` and earlier), see [docs/changlelog.md](
 - `requirements.txt`: added `fastapi`, `uvicorn`, `python-multipart`, and `websockets` for the Studio engine.
 
 ### Fixed
+- **A model file that changes or is locked while Studio checks it is no longer reported as damaged ([#13](https://github.com/roscoe-sincero-sys/GladTalker/issues/13)).** `GET /models` gives each file a `state` (`ready`, `missing`, `incomplete`, `damaged`, or `busy`), plus a top-level `busy` count. Auto-Cast and **Render** answer HTTP 503 with `Retry-After` and `"retryable": true` instead of a generic 500. Only a completed check that finds a checksum mismatch counts as damaged. The Setup panel lists busy files as "checking again shortly", leaves them out of the download list, and checks them again after 3 s.
+- **Importing a script keeps a cast name's own underscores ([#14](https://github.com/roscoe-sincero-sys/GladTalker/issues/14)).** With `Crew_` in the cast, `Crew_: Ready.` imports as `Crew_` and renders, instead of becoming an unknown `Crew`. This also works for screenplay-style name lines. Markdown emphasis around a name (`**Crew_**:`, `_Narrator_:`) is still removed.
+- **Previewing a voice with only spaces returns HTTP 422 ("Enter some text to preview.") instead of 500 ([#15](https://github.com/roscoe-sincero-sys/GladTalker/issues/15)).**
 - **Studio accessibility fixes from the phase 4 audit:**
   - An edit made just before closing or reloading the window is no longer lost. The autosave also runs when the page is hidden or closed, not only 300 ms after the last change (3.3.7).
   - At 320 px with WCAG text spacing, the **Detection sensitivity** field no longer pushes the page sideways (1.4.10, 1.4.12).

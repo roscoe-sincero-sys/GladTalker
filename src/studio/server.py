@@ -48,7 +48,7 @@ from src.studio.audio import VOICE_PRESETS, TTSService
 from src.studio.faces import FaceDetectorService, suggest_cast
 from src.studio.ffmpeg import FFmpegError, find_ffmpeg
 from src.studio.hardware import DeviceManager, download_models, hardware_report, models_status
-from src.studio.jobs import TERMINAL_STATES, Job, JobManager, UserFacingError
+from src.studio.jobs import TERMINAL_STATES, Job, JobManager, RetryLaterError, UserFacingError
 from src.studio.previews import PreviewStore
 from src.studio.schemas import (
     AudioPreviewRequest,
@@ -183,6 +183,11 @@ def create_app(config: Optional[StudioConfig] = None, services: Optional[StudioS
     @app.exception_handler(UserFacingError)
     async def _user_error(request: Request, exc: UserFacingError):
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.exception_handler(RetryLaterError)
+    async def _retry_later(request: Request, exc: RetryLaterError):
+        return JSONResponse(status_code=503, content={"detail": str(exc), "retryable": True},
+                            headers={"Retry-After": str(exc.retry_after_s)})
 
     @app.exception_handler(FFmpegError)
     async def _ffmpeg_error(request: Request, exc: FFmpegError):

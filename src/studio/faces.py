@@ -192,18 +192,23 @@ class FaceDetectorService:
         touches them: facexlib would silently use a damaged file, or download a missing one with
         no checksum. Only this one file is required, so casting works before render models are
         installed."""
-        from scripts.download_models import expected_for, is_verified
+        from scripts.download_models import BUSY, MISSING, READY, expected_for, verification_state
 
-        from src.studio.jobs import UserFacingError
+        from src.studio.jobs import RetryLaterError, UserFacingError
 
         path = Path(self.model_root) / DETECTOR_WEIGHTS
-        expected = expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}")
-        if not path.is_file():
+        state = verification_state(path, expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}"))
+        if state == MISSING:
             raise UserFacingError(
                 f"The face-detection model ({DETECTOR_WEIGHTS}) isn't downloaded yet. "
                 "Choose Download Models, then try Auto-Cast again."
             )
-        if not is_verified(path, expected):
+        if state == BUSY:
+            raise RetryLaterError(
+                f"The face-detection model ({DETECTOR_WEIGHTS}) is being updated or is in use by "
+                "another program, so it couldn't be checked. Try Auto-Cast again in a moment."
+            )
+        if state != READY:
             raise UserFacingError(
                 f"The face-detection model ({DETECTOR_WEIGHTS}) is incomplete or damaged. "
                 "Choose Download Models to repair it, then try Auto-Cast again."

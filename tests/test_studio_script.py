@@ -84,6 +84,31 @@ class ParseScriptTests(unittest.TestCase):
         })
         self.assertEqual({l.speaker for l in req.script}, {"Officer  Mia"})
 
+    def test_cast_label_with_literal_underscores_is_preserved(self):
+        """Underscores that belong to a cast name are not Markdown emphasis: the imported lines keep
+        the stored spelling and render with that cast, while emphasis around a name still works."""
+        from src.studio.schemas import RenderRequest
+
+        cast = ["Crew_", "_Pilot", "Brain"]
+        parsed = parse_script("Crew_: Ready.\n**Crew_**: Set.\n_Pilot: Go.\n__Brain__: Click it.\n"
+                              "CREW_\nStill here.\n**_Pilot**\nLanding.", cast=cast)
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], [
+            ("Crew_", "Ready."), ("Crew_", "Set."), ("_Pilot", "Go."), ("Brain", "Click it."),
+            ("Crew_", "Still here."), ("_Pilot", "Landing."),
+        ])
+        self.assertEqual(parsed.unknown_speakers, [])
+        req = RenderRequest.model_validate({
+            "image_path": "scene.png",
+            "cast": [{"name": n, "region": {"x": 0, "y": 0, "w": 64, "h": 64}} for n in cast],
+            "script": [{"speaker": l.speaker, "text": l.text} for l in parsed.lines],
+        })
+        self.assertEqual([l.speaker for l in req.script], [l.speaker for l in parsed.lines])
+
+    def test_emphasis_is_still_stripped_from_names_outside_the_cast(self):
+        r = parse_script("_Narrator_: Meanwhile.\n**Brain**: Hi.", cast=["Brain"])
+        self.assertEqual([l.speaker for l in r.lines], ["Narrator", "Brain"])
+        self.assertEqual(r.unknown_speakers, ["Narrator"])
+
     def test_render_matches_speakers_ignoring_case_and_spacing(self):
         from src.studio.schemas import RenderRequest
 

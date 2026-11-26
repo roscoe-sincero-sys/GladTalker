@@ -27,7 +27,7 @@ from src.studio import REPO_ROOT
 from src.studio.audio import FPS, DialogueTooLongError, TTSService, build_dialogue_audio
 from src.studio.captions import to_srt, to_vtt
 from src.studio.ffmpeg import NO_WINDOW, FFmpegError, require_ffmpeg
-from src.studio.jobs import JobCancelled, JobContext, UserFacingError
+from src.studio.jobs import JobCancelled, JobContext, RetryLaterError, UserFacingError
 from src.studio.schemas import OUTPUT_PRESETS, OutputSettings, RenderRequest
 
 MIN_REGION_PX = 32
@@ -243,11 +243,12 @@ def check_models(root: Path = REPO_ROOT, quality_mode: str = "standard", size: i
     needed += [weights / "alignment_WFLW_4HG.pth", weights / "detection_Resnet50_Final.pth"]
     if quality_mode == "enhanced":
         needed += [weights / "GFPGANv1.4.pth", weights / "parsing_parsenet.pth"]
-    from scripts.download_models import expected_for, is_verified
+    from scripts.download_models import BUSY, MISSING, READY, expected_for, verification_state
 
-    missing = [p.name for p in needed if not p.is_file()]
-    broken = [p.name for p in needed
-              if p.is_file() and not is_verified(p, expected_for(p.relative_to(root).as_posix()))]
+    states = {p.name: verification_state(p, expected_for(p.relative_to(root).as_posix())) for p in needed}
+    missing = [n for n, s in states.items() if s == MISSING]
+    busy = [n for n, s in states.items() if s == BUSY]
+    broken = [n for n, s in states.items() if s not in (MISSING, BUSY, READY)]
     if missing or broken:
         parts = []
         if missing:
@@ -255,6 +256,10 @@ def check_models(root: Path = REPO_ROOT, quality_mode: str = "standard", size: i
         if broken:
             parts.append(f"incomplete or damaged: {', '.join(broken)}")
         raise UserFacingError(f"Some models are {'; '.join(parts)}. Choose Download Models first.")
+    if busy:
+        # Being replaced or locked by another program right now: nothing to repair, just wait.
+        raise RetryLaterError(f"Some models are being updated or are in use by another program, so "
+                              f"they couldn't be checked: {', '.join(busy)}. Try again in a moment.")
 
 
 # --------------------------------------------------------------------------------------------

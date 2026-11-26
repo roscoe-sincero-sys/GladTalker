@@ -204,6 +204,26 @@ def is_verified(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool
     return file_digest(dest, use_cache=use_cache) == expected[1]
 
 
+MISSING, INCOMPLETE, READY, DAMAGED, BUSY = "missing", "incomplete", "ready", "damaged", "busy"
+
+
+def verification_state(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool = True) -> str:
+    """Classify ``dest`` without raising: ``missing``; ``incomplete`` (wrong size); ``ready``
+    (pinned size and SHA-256); ``damaged`` (a completed check found a checksum mismatch); or
+    ``busy`` when the check couldn't finish because the file kept changing, was locked by another
+    program, or vanished mid-check (it is being replaced). ``busy`` is temporary: check again
+    shortly rather than repairing."""
+    dest = Path(dest)
+    try:
+        if not dest.is_file():
+            return MISSING
+        if not is_complete(dest, expected):
+            return INCOMPLETE
+        return READY if is_verified(dest, expected, use_cache=use_cache) else DAMAGED
+    except OSError:  # FileChangedError, a sharing violation, or the file disappearing
+        return BUSY
+
+
 def _verified_quietly(dest: Path, expected: tuple[int, str]) -> bool:
     """Fresh (uncached) verification that treats "file busy" as not verified yet: on Windows the
     destination can't be opened while another writer is mid-replace."""
