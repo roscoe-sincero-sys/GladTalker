@@ -1,13 +1,12 @@
 <script>
   import { api, revokeMedia } from '../lib/api.js';
-  import { project, newId, nextStyleIndex, projectGuard, MAX_CAST } from '../lib/project.svelte.js';
+  import { project, newId, nextStyleIndex, projectGuard, sceneUpload, MAX_CAST } from '../lib/project.svelte.js';
   import { announce, announceError } from '../lib/announce.svelte.js';
   import { clampRegion, defaultRegion, overlap } from '../lib/regions.js';
   import Stage from '../components/Stage.svelte';
   import CastMemberCard from '../components/CastMemberCard.svelte';
 
   let imageUrl = $state('');
-  let uploading = $state(false);
   let detecting = $state(false);
   let sensitivity = $state('0.2');
   let fileError = $state('');
@@ -52,9 +51,10 @@
 
   async function chooseFile(file) {
     if (!file) return;
-    // One upload at a time, from the picker or a drop: a second one could finish first and then
-    // be overwritten by the older answer.
-    if (uploading) {
+    // One upload at a time, from the picker or a drop, and across leaving and coming back to Cast
+    // (the busy flag is the project's): a second one could finish first and then be overwritten
+    // by the older answer.
+    if (sceneUpload.busy) {
       announce('Still uploading the previous image. Try again when it has finished.');
       return;
     }
@@ -63,7 +63,7 @@
       fileError = `“${file.name}” isn’t a supported image. Use PNG, JPEG, BMP, or WebP.`;
       return;
     }
-    uploading = true;
+    sceneUpload.busy = true;
     const current = projectGuard();
     try {
       const res = await api.upload(file);
@@ -78,7 +78,7 @@
       fileError = err.message;
       announceError(err.message);
     } finally {
-      uploading = false;
+      sceneUpload.busy = false;
     }
   }
 
@@ -161,10 +161,10 @@
           <label for="scene-file">{project.image ? 'Replace the scene image' : 'Scene image'}</label>
           <input id="scene-file" type="file" accept="image/png,image/jpeg,image/bmp,image/webp"
             aria-describedby="scene-file-hint{fileError ? ' scene-file-error' : ''}" aria-invalid={fileError ? 'true' : undefined}
-            aria-disabled={uploading ? 'true' : undefined} onclick={(e) => { if (uploading) e.preventDefault(); }}
+            aria-disabled={sceneUpload.busy ? 'true' : undefined} onclick={(e) => { if (sceneUpload.busy) e.preventDefault(); }}
             onchange={(e) => chooseFile(e.currentTarget.files?.[0])} />
           <p class="hint" id="scene-file-hint">A portrait, a video-call screenshot, or a comic panel. PNG, JPEG, BMP, or WebP, up to 50 MB. You can also drop the file here.</p>
-          {#if uploading}<p class="muted" role="status">Uploading…</p>{/if}
+          {#if sceneUpload.busy}<p class="muted" role="status">Uploading…</p>{/if}
           {#if fileError}<p class="error-text" id="scene-file-error">{fileError}</p>{/if}
         </div>
       </div>

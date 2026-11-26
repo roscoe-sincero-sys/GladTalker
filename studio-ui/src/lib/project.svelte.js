@@ -117,6 +117,11 @@ export function projectGuard() {
   return () => mine === generation;
 }
 
+// The scene upload in flight. It belongs to the project, not to a Cast view: leaving Cast and
+// coming back mounts a new view, which must still see the earlier upload as busy, so a second
+// upload can't be accepted and then overwritten when the earlier answer arrives.
+export const sceneUpload = $state({ busy: false });
+
 /** Replace the whole project in place (keeps the reactive object identity). */
 /** Does this project hold anything a user made or chose: a scene, cast, script, or any setting
  * changed from the defaults? New and Open ask before replacing such a project (WCAG 3.3.4).

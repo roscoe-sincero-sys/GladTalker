@@ -1,5 +1,6 @@
 // End-to-end: the built Studio UI against a real engine (see playwright.config.js).
 import { test, expect } from '@playwright/test';
+import path from 'node:path';
 import { E2E_TOKEN } from '../playwright.config.js';
 import { PORTRAIT, axeViolations, openStudio, tokenBase, hold, fakeRender, renderSnapshot, readyToRoll, SRT, VTT, savedProject, castPortrait } from './helpers.js';
 
@@ -387,6 +388,40 @@ test('token mode: a caption download failure still shows the video, and captions
   await expect(page.getByRole('link', { name: 'Download captions (SRT)' })).toHaveAttribute('download', 'Ann_scene.srt');
   await expect(page.locator('video track[kind="captions"]')).toHaveCount(1);
   await expect(page.getByText(/captions couldn’t be loaded/)).toHaveCount(0);
+});
+
+const SECOND_SCENE = path.resolve(import.meta.dirname, '../../examples/source_image/art_0.png');
+
+test('leaving Cast and coming back during an upload still turns a second image away, so the older answer can’t replace it', async ({ page }) => {
+  await openStudio(page);
+  const uploads = [];
+  page.on('request', (r) => { if (r.method() === 'POST' && r.url().endsWith('/uploads')) uploads.push(r.url()); });
+  const release = await hold(page, '**/uploads');
+  await page.getByLabel('Scene image').setInputFiles(PORTRAIT); // scene A, held by the engine
+  await release.reached;
+
+  const steps = page.getByRole('navigation', { name: 'Steps' });
+  await steps.getByRole('button', { name: /Script/ }).click();
+  await expect(page.getByRole('heading', { name: 'Step 2 of 3: Script' })).toBeVisible();
+  await steps.getByRole('button', { name: /Cast/ }).click(); // a new Cast view
+  await expect(page.getByRole('heading', { name: 'Step 1 of 3: Cast' })).toBeVisible();
+  await expect(page.getByText('Uploading…')).toBeVisible(); // it knows about scene A
+
+  // Scene B, from the picker this time.
+  await page.getByLabel('Scene image').setInputFiles({ name: 'second.png', mimeType: 'image/png', buffer: Buffer.from([137, 80, 78, 71]) });
+  await expect(page.locator('[role="status"][aria-live="polite"]').last()).toHaveText(/Still uploading the previous image/);
+
+  release(); // scene A's answer arrives
+  await expect(page.getByRole('img', { name: /Scene: people_0\.png/ })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(uploads).toHaveLength(1); // B was never sent, so nothing newer was accepted to be overwritten
+  expect((await savedProject(page)).image.name).toBe('people_0.png');
+  await expect(page.getByText('Uploading…')).toHaveCount(0);
+
+  // Once A is done, a new scene is accepted again and kept.
+  await page.getByLabel('Scene image').setInputFiles(SECOND_SCENE);
+  await expect(page.getByRole('img', { name: /Scene: art_0\.png/ })).toBeVisible();
+  await expect.poll(async () => (await savedProject(page)).image.name).toBe('art_0.png');
 });
 
 test('a second image dropped while one is uploading is turned away, so an older upload can’t replace a newer scene', async ({ page }) => {

@@ -73,11 +73,28 @@ function freePort() {
 }
 
 /** A throwaway profile: WebView2 data (localStorage, so the autosaved project), the app's
- * settings and logs, and the engine workspace, all under one temporary folder. */
+ * settings and logs, and the engine workspace, all under one temporary folder. It is deleted
+ * after the test however the test ends (passed, failed, or skipped; see removeProfiles). */
 // The names have a space on purpose: paths with spaces (say, a user name with one) must work.
 function newProfile(name = 'gladtalker desktop-') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), name));
+  profilesToRemove.push(root);
   return { root, webview: path.join(root, 'webview2'), data: path.join(root, 'app-data'), workspace: path.join(root, 'workspace') };
+}
+
+const profilesToRemove = [];
+
+/** Deletes this test's profiles. Runs after the test body (and its finally blocks, which close
+ * the app) on every path: test.skip() ends a test by throwing, which would skip any cleanup
+ * written after the body's try/finally. WebView2 can take a moment to let go of its files. */
+function removeProfiles() {
+  for (const root of profilesToRemove.splice(0)) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch (err) {
+      console.warn(`Couldn’t delete the test profile ${root}: ${err.message}`);
+    }
+  }
 }
 
 async function launchApp(profile) {
@@ -121,6 +138,7 @@ const isEmptyProject = (p) => !p || (!p.image && p.cast.length === 0 && p.script
 const savedDraft = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('gladtalker.project.v1') || 'null'));
 
 test.describe.configure({ mode: 'serial' });
+test.afterEach(removeProfiles);
 
 test('the desktop app starts its engine, works end to end, and stops the engine when closed', async () => {
   test.setTimeout(6 * 60_000);
@@ -178,7 +196,6 @@ test('the desktop app starts its engine, works end to end, and stops the engine 
   }
   await waitFor(() => enginesOf(app.pid).length === 0, 30_000, 'the engine to stop after the app closed');
   expect(fs.existsSync(path.join(profile.data, 'logs', 'engine.log'))).toBe(true); // logs went to the test's folder
-  fs.rmSync(profile.root, { recursive: true, force: true });
 });
 
 test('a test run never touches another profile’s autosaved draft', async () => {
@@ -206,7 +223,6 @@ test('a test run never touches another profile’s autosaved draft', async () =>
   await expect(launched.page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
   expect((await savedDraft(launched.page)).script.map((l) => l.text)).toEqual(['My unfinished draft.']);
   await closeApp(launched);
-  for (const p of [user, testRun]) fs.rmSync(p.root, { recursive: true, force: true });
 });
 
 test('if the app crashes, its engine still shuts itself down', async () => {
@@ -219,7 +235,6 @@ test('if the app crashes, its engine still shuts itself down', async () => {
   execFileSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore' }); // no chance to clean up
   await disconnect(browser);
   await waitFor(() => enginesOf(pid).length === 0, 60_000, 'the orphaned engine to notice and exit');
-  try { fs.rmSync(profile.root, { recursive: true, force: true }); } catch { /* WebView2 may still be letting go */ }
 });
 
 /** Types real keystrokes into the app's window (only if it is in front; see send-keys.ps1). */
@@ -289,7 +304,6 @@ test('screen readers get named controls, headings, and landmarks through UI Auto
   } finally {
     await closeApp(launched);
   }
-  fs.rmSync(profile.root, { recursive: true, force: true });
 });
 
 test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (WCAG2ICT 1.4.4)', async () => {
@@ -318,5 +332,4 @@ test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (
   } finally {
     await closeApp(launched);
   }
-  fs.rmSync(profile.root, { recursive: true, force: true });
 });
