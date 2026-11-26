@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { createTeardown } from './teardown.js';
 
 const require = createRequire(import.meta.url);
 const AXE_SOURCE = fs.readFileSync(require.resolve('axe-core/axe.min.js'), 'utf-8');
@@ -73,10 +74,11 @@ function freePort() {
 }
 
 /** A throwaway profile: WebView2 data (localStorage, so the autosaved project), the app's
- * settings and logs, and the engine workspace, all under one temporary folder. */
+ * settings and logs, and the engine workspace, all under one temporary folder. It is deleted
+ * after the test however the test ends, once its apps have exited (see teardown.js). */
 // The names have a space on purpose: paths with spaces (say, a user name with one) must work.
 function newProfile(name = 'gladtalker desktop-') {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), name));
+  const root = teardown.profile(fs.mkdtempSync(path.join(os.tmpdir(), name)));
   return { root, webview: path.join(root, 'webview2'), data: path.join(root, 'app-data'), workspace: path.join(root, 'workspace') };
 }
 
@@ -95,6 +97,8 @@ async function launchApp(profile) {
     cwd: profile.root,
     stdio: 'ignore',
   });
+  // Registered before anything can fail, so teardown closes it even if DevTools never attaches.
+  const launched = teardown.app({ app, browser: null, page: null }, profile.root);
   const browser = await waitFor(async () => {
     try {
       return await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
@@ -102,9 +106,11 @@ async function launchApp(profile) {
       return null;
     }
   }, 60_000, 'the app’s WebView2 to accept a DevTools connection');
+  launched.browser = browser;
   const page = await waitFor(async () => browser.contexts()[0]?.pages().find((p) => !p.url().startsWith('devtools')), 30_000, 'the Studio page');
   page.setDefaultTimeout(60_000);
-  return { app, browser, page };
+  launched.page = page;
+  return launched;
 }
 
 /** Closes the window the normal way (WM_CLOSE) and waits for the app to exit. */
@@ -112,8 +118,32 @@ async function closeApp({ app, browser }) {
   // The app goes first: closing a DevTools connection to WebView2 can wait on its browser process.
   try { execFileSync('taskkill', ['/PID', String(app.pid)], { stdio: 'ignore' }); } catch { /* already gone */ }
   await waitFor(() => app.exitCode !== null, 30_000, 'the app to exit');
-  await disconnect(browser);
+  if (browser) await disconnect(browser);
 }
+
+const hasExited = (app) => app.exitCode !== null || app.signalCode !== null;
+
+/** Teardown's way to close an app: the normal way if it is still running, by force (with the
+ * processes it started) if that doesn't work, then waits for its engine to exit too, since the
+ * engine writes into the profile's workspace. Resolves only once both are confirmed gone. */
+async function stopApp(launched) {
+  const { app, browser } = launched;
+  if (!hasExited(app)) {
+    try {
+      await closeApp(launched);
+    } catch {
+      try { execFileSync('taskkill', ['/PID', String(app.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }
+      await waitFor(() => hasExited(app), 15_000, 'the app to exit after being stopped by force');
+    }
+  } else if (browser) {
+    await disconnect(browser);
+  }
+  // Throws if the engine can't be confirmed gone (still running, or the process list unreadable):
+  // teardown then keeps the profile rather than delete it under the engine.
+  await waitFor(() => enginesOf(app.pid).length === 0, 60_000, 'the app’s engine to exit');
+}
+
+const teardown = createTeardown({ stopApp });
 
 /** A new profile holds nothing, or the empty project the app autosaves on its first start. */
 const isEmptyProject = (p) => !p || (!p.image && p.cast.length === 0 && p.script.length === 0);
@@ -121,6 +151,7 @@ const isEmptyProject = (p) => !p || (!p.image && p.cast.length === 0 && p.script
 const savedDraft = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('gladtalker.project.v1') || 'null'));
 
 test.describe.configure({ mode: 'serial' });
+test.afterEach(() => teardown.run());
 
 test('the desktop app starts its engine, works end to end, and stops the engine when closed', async () => {
   test.setTimeout(6 * 60_000);
@@ -178,7 +209,6 @@ test('the desktop app starts its engine, works end to end, and stops the engine 
   }
   await waitFor(() => enginesOf(app.pid).length === 0, 30_000, 'the engine to stop after the app closed');
   expect(fs.existsSync(path.join(profile.data, 'logs', 'engine.log'))).toBe(true); // logs went to the test's folder
-  fs.rmSync(profile.root, { recursive: true, force: true });
 });
 
 test('a test run never touches another profile’s autosaved draft', async () => {
@@ -206,7 +236,6 @@ test('a test run never touches another profile’s autosaved draft', async () =>
   await expect(launched.page.getByText(/Computer: (?!Detecting)/)).toBeVisible({ timeout: 180_000 });
   expect((await savedDraft(launched.page)).script.map((l) => l.text)).toEqual(['My unfinished draft.']);
   await closeApp(launched);
-  for (const p of [user, testRun]) fs.rmSync(p.root, { recursive: true, force: true });
 });
 
 test('if the app crashes, its engine still shuts itself down', async () => {
@@ -219,7 +248,6 @@ test('if the app crashes, its engine still shuts itself down', async () => {
   execFileSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore' }); // no chance to clean up
   await disconnect(browser);
   await waitFor(() => enginesOf(pid).length === 0, 60_000, 'the orphaned engine to notice and exit');
-  try { fs.rmSync(profile.root, { recursive: true, force: true }); } catch { /* WebView2 may still be letting go */ }
 });
 
 /** Types real keystrokes into the app's window (only if it is in front; see send-keys.ps1). */
@@ -289,7 +317,6 @@ test('screen readers get named controls, headings, and landmarks through UI Auto
   } finally {
     await closeApp(launched);
   }
-  fs.rmSync(profile.root, { recursive: true, force: true });
 });
 
 test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (WCAG2ICT 1.4.4)', async () => {
@@ -318,5 +345,4 @@ test('Ctrl+Plus zooms the window to 200 %, and everything still fits and works (
   } finally {
     await closeApp(launched);
   }
-  fs.rmSync(profile.root, { recursive: true, force: true });
 });

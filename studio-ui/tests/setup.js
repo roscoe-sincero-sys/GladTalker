@@ -20,5 +20,5 @@ URL.revokeObjectURL ??= () => {};
 
 afterEach(() => {
   cleanup();
-  localStorage.clear();
+  globalThis.localStorage?.clear(); // absent in files that run in plain Node (// @vitest-environment node)
 });
