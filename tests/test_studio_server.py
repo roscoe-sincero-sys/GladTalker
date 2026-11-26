@@ -512,6 +512,32 @@ class StudioServerTests(unittest.TestCase):
         self.assertTrue(r.json()["retryable"])
         self.assertIn("detection_Resnet50_Final.pth is being updated", r.json()["detail"])
 
+    @windows_only
+    def test_lock_during_load_gets_retry_advice_whatever_the_folder_casing(self):
+        """The configured detector folder is "gfpgan/weights" but the folders on disk are spelled
+        "GFPGAN/WEIGHTS": still the pinned file, so a late lock is still a retryable 503."""
+        import contextlib
+
+        from src.studio.faces import FaceDetectorService
+
+        root = self._install_models()
+        shutil.rmtree(root / "gfpgan")
+        (root / "GFPGAN" / "WEIGHTS").mkdir(parents=True)
+        (root / "GFPGAN" / "WEIGHTS" / "detection_Resnet50_Final.pth").write_bytes(b"weights" * 64)
+        self.services.detector = FaceDetectorService(model_root=str(root / "gfpgan" / "weights"))
+        path = root / "gfpgan" / "weights" / "detection_Resnet50_Final.pth"
+        with contextlib.ExitStack() as held:
+            def load(*args, **kwargs):
+                import torch
+
+                held.enter_context(range_lock(path, offset=0, length=path.stat().st_size))
+                return torch.load(str(path), map_location="cpu", weights_only=True)
+
+            with mock.patch("facexlib.detection.init_detection_model", side_effect=load):
+                r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertTrue(r.json()["retryable"])
+
     def test_detector_out_of_memory_is_not_disguised_by_a_busy_checkpoint(self):
         """Running out of memory while the detector moves to its device isn't a model read, so it
         isn't turned into retry advice even if a model file happens to be busy then."""

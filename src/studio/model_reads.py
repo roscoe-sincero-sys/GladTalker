@@ -32,20 +32,39 @@ _install_lock = threading.Lock()
 _installed = False
 
 
+def _same_path(a: Path, b: Path) -> bool:
+    """Whether two spellings name the same file: compared the way the platform compares paths
+    (on Windows, ignoring case and slash direction), then by file identity for anything else
+    (symlinks, short names), without resolving either spelling."""
+    if os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b)):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _pin_for(target: Path, root: Path) -> Optional[tuple[int, str]]:
+    """The pin of the model file under ``root`` that ``target`` names (however it is spelled), or
+    None if it isn't one of the pinned model files."""
+    from scripts.download_models import MODEL_CHECKSUMS
+
+    for rel, expected in MODEL_CHECKSUMS.items():
+        if _same_path(target, root / rel):
+            return expected
+    return None
+
+
 def _explain(path, exc: BaseException) -> None:
     """Raise RetryLaterError or UserFacingError for a failed read of a pinned model file under one
     of this thread's roots; return quietly if the file is healthy or isn't a model file."""
-    from scripts.download_models import BUSY, MISSING, READY, expected_for, verification_state
+    from scripts.download_models import BUSY, MISSING, READY, verification_state
 
-    target = Path(os.fspath(path)).resolve()
+    target = Path(os.fspath(path))
     for root in reversed(getattr(_active, "roots", [])):
-        try:
-            rel = target.relative_to(Path(root).resolve()).as_posix()
-        except ValueError:
-            continue
-        expected = expected_for(rel)
+        expected = _pin_for(target, Path(root))
         if expected is None:
-            return
+            continue
         state = verification_state(target, expected, use_cache=False)
         if state == BUSY:
             raise RetryLaterError(
@@ -60,14 +79,18 @@ def _explain(path, exc: BaseException) -> None:
         return
 
 
-def _explained(read):
+def _explained(read, path_param: str):
+    """``read`` with every argument passed through unchanged; on failure, the file it was asked to
+    read (the ``path_param`` argument, given by position or by name) is explained."""
     @functools.wraps(read)
-    def read_model_file(f, *args, **kwargs):
+    def read_model_file(*args, **kwargs):
         try:
-            return read(f, *args, **kwargs)
+            return read(*args, **kwargs)
         except Exception as exc:
-            if getattr(_active, "roots", None) and isinstance(f, (str, os.PathLike)):
-                _explain(f, exc)
+            if getattr(_active, "roots", None):
+                source = args[0] if args else kwargs.get(path_param)
+                if isinstance(source, (str, os.PathLike)):
+                    _explain(source, exc)
             raise
 
     read_model_file.__explains_model_reads__ = True
@@ -82,10 +105,11 @@ def _install() -> None:
         import safetensors.torch
         import torch
 
-        for module, name in ((torch, "load"), (safetensors.torch, "load_file")):
+        # The file is torch.load's ``f`` and safetensors.torch.load_file's ``filename``.
+        for module, name, path_param in ((torch, "load", "f"), (safetensors.torch, "load_file", "filename")):
             current = getattr(module, name)
             if not getattr(current, "__explains_model_reads__", False):
-                setattr(module, name, _explained(current))
+                setattr(module, name, _explained(current, path_param))
         _installed = True
 
 

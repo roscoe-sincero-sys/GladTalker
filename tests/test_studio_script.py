@@ -200,6 +200,36 @@ class ParseScriptTests(unittest.TestCase):
         self.assertEqual(long, short, work)  # a 40x longer line costs nothing more to label
         self.assertLess(short, 3_000, work)  # about 20 colons within reach of a 16-character name
 
+    def test_padding_never_pushes_a_longer_cast_name_out_of_reach(self):
+        """The search limit ignores spacing, like name matching: alignment spaces or a note before
+        the colon still find "Team: Blue" rather than the shorter "Team"."""
+        cast = ["Team", "Team: Blue"]
+        pad = " " * 300
+        parsed = parse_script(f"Team: Blue (calmly){pad}: Ready.\nTeam:{pad}Blue{pad}: Go.\n"
+                              f"Team{pad}: Plain.\nTEAM:  BLUE\nWe win.", cast=cast)
+        expected = [("Team: Blue", "Ready."), ("Team: Blue", "Go."), ("Team", "Plain."), ("Team: Blue", "We win.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.lines[0].note, "calmly")
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
+    def test_a_huge_run_of_spaces_is_read_once(self):
+        from unittest import mock
+
+        from src.studio import script
+
+        processed = []
+        real_key = script.name_key
+
+        def counting_key(name):
+            processed.append(len(name))
+            return real_key(name)
+
+        line = "Team: Blue" + " " * 100_000 + ": Ready. " + "Then at 10:15: go. " * 200
+        with mock.patch.object(script, "name_key", counting_key):
+            parsed = parse_script(line, cast=["Team", "Team: Blue"])
+        self.assertEqual((parsed.lines[0].speaker, parsed.lines[0].text[:6]), ("Team: Blue", "Ready."))
+        self.assertLess(sum(processed), 3_000)
+
     def test_a_headers_note_goes_with_the_line_after_it(self):
         parsed = parse_script("Mia (quietly):\nShh.\n\nOut loud now.\n\n**Mia** (whispering)\nPsst.", cast=["Mia"])
         self.assertEqual([(l.speaker, l.note, l.text) for l in parsed.lines], [

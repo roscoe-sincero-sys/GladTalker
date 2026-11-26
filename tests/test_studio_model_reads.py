@@ -79,6 +79,53 @@ class ExplainCheckpointReadsTests(unittest.TestCase):
             with self.assertRaisesRegex(UserFacingError, "is damaged"):
                 safetensors.torch.load_file(str(self.path(self.GFPGAN)))
 
+    def test_loaders_keep_their_call_signatures_inside_and_after_the_block(self):
+        """Every supported call form still works, by position or by keyword, both while a block is
+        active and after it has ended (the wrappers stay installed for the whole process)."""
+        import safetensors.torch
+
+        tensors = {"w": torch.arange(4, dtype=torch.float32)}
+        st_path, pt_path = self.root / "ok.safetensors", self.root / "ok.pt"
+        safetensors.torch.save_file(tensors, str(st_path))
+        torch.save(tensors, str(pt_path))
+
+        def read_all():
+            for loaded in (safetensors.torch.load_file(str(st_path)),
+                           safetensors.torch.load_file(filename=str(st_path), device="cpu"),
+                           torch.load(str(pt_path), weights_only=True),
+                           torch.load(f=str(pt_path), map_location="cpu", weights_only=True)):
+                self.assertTrue(torch.equal(loaded["w"], tensors["w"]))
+
+        read_all()
+        with explain_checkpoint_reads(self.root):
+            read_all()
+        read_all()
+
+    def test_a_failed_keyword_read_is_explained_too(self):
+        import safetensors.torch
+
+        self.path(self.GFPGAN).write_bytes(b"X" + self.data[1:])
+        with explain_checkpoint_reads(self.root):
+            with self.assertRaisesRegex(UserFacingError, "is damaged"):
+                safetensors.torch.load_file(filename=str(self.path(self.GFPGAN)), device="cpu")
+            with self.assertRaisesRegex(UserFacingError, "is damaged"):
+                torch.load(f=str(self.path(self.GFPGAN)), weights_only=True)
+
+    @windows_only
+    def test_a_differently_cased_path_to_a_pinned_file_is_still_that_file(self):
+        """Windows paths ignore case: "GFPGAN/WEIGHTS" on disk and "gfpgan/weights" in the pin are
+        the same file, so its failed read gets the same explanation."""
+        shouty = self.root / "SHOUTY"
+        (shouty / "GFPGAN" / "WEIGHTS").mkdir(parents=True)
+        on_disk = shouty / "GFPGAN" / "WEIGHTS" / "GFPGANV1.4.PTH"
+        on_disk.write_bytes(b"X" + self.data[1:])
+        asked = shouty / "gfpgan" / "weights" / "GFPGANv1.4.pth"
+        with explain_checkpoint_reads(self.root / "shouty"):
+            with self.assertRaisesRegex(UserFacingError, "is damaged"):
+                torch.load(str(asked), weights_only=True)
+            with self.assertRaisesRegex(UserFacingError, "is damaged"):
+                torch.load(str(on_disk), weights_only=True)
+
     def test_out_of_memory_with_an_unrelated_locked_checkpoint_keeps_its_message(self):
         """Moving a model to the device isn't a model read: its failure propagates as itself and
         nothing is rehashed, even while another checkpoint is busy."""
