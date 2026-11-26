@@ -251,6 +251,38 @@ test('a late Cancel acknowledgement never brings back a render that has already 
   await expect(polite).toHaveText('Render cancelled.'); // the terminal state is still what's announced
 });
 
+test('a slow first status lookup never holds back the announcement that a cancelled render ended', async ({ page }) => {
+  await openStudio(page);
+  await readyToRoll(page);
+  const id = 'fa0000000005';
+  let state = 'running';
+  const snapshot = () => renderSnapshot(id, state, state === 'cancelled' ? { message: 'Cancelled.' } : {});
+  await fakeRender(page, id, snapshot);
+  await page.route('**/render/start', (route) => route.fulfill({ status: 202, json: renderSnapshot(id, 'queued') }));
+  // The first status request (the "was it still running?" lookup made on attaching) is held;
+  // the watcher's later polls are answered normally.
+  const lookup = await hold(page, `**/jobs/${id}`, (route) => route.fulfill({ json: snapshot() }));
+  await page.getByRole('button', { name: /Render video/ }).click();
+  await lookup.reached;
+  await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
+
+  const polite = page.locator('[role="status"][aria-live="polite"]').last();
+  const ack = await hold(page, `**/jobs/${id}/cancel`,
+    (route) => route.fulfill({ json: renderSnapshot(id, 'running', { cancel_requested: true }) }));
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await ack.reached;
+  await expect(polite).toHaveText('Cancelling the render…');
+  state = 'cancelled';
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+  await expect(polite).toHaveText('Render cancelled.'); // without waiting for the held lookup
+
+  lookup(); // the lookup now answers "cancelled": too late to matter
+  ack();
+  await page.waitForTimeout(300);
+  await expect(polite).toHaveText('Render cancelled.');
+  await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+});
+
 test('a project file never contains a saved job id it shouldn’t follow, or lines removed after a preview', async ({ page }) => {
   await openStudio(page);
   await castPortrait(page);

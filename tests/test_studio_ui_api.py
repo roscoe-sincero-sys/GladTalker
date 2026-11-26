@@ -321,6 +321,69 @@ class PreviewRetentionTests(unittest.TestCase):
         self._store(stale_s=60).new_folder("k", self.jobs)
         self.assertFalse(store.dir.exists())
 
+    def _outside_folder_with_a_stale_marker(self):
+        """A folder outside previews/ that looks like a dead engine's (marker and all)."""
+        target = self.tmp / "elsewhere"
+        target.mkdir()
+        (target / "precious.txt").write_text("keep me", encoding="utf-8")
+        (target / ".owner.lock").write_bytes(b"")
+        old = time.time() - 7 * 24 * 3600
+        os.utime(target / ".owner.lock", (old, old))
+        return target
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_a_junction_posing_as_an_engine_folder_is_never_entered(self):
+        import _winapi
+
+        target = self._outside_folder_with_a_stale_marker()
+        self.root.mkdir(parents=True)
+        link = self.root / "engine-0123456789ab"
+        _winapi.CreateJunction(str(target), str(link))
+        self.addCleanup(lambda: os.path.lexists(link) and os.rmdir(link))
+        self._store(stale_s=0).new_folder("j", self.jobs)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue((target / ".owner.lock").exists())
+        self.assertTrue(os.path.lexists(link), "skipped, not cleaned up through")
+
+    def test_a_symlink_posing_as_an_engine_folder_is_never_entered(self):
+        target = self._outside_folder_with_a_stale_marker()
+        self.root.mkdir(parents=True)
+        link = self.root / "engine-0123456789ab"
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"can't create symlinks here: {exc}")
+        self._store(stale_s=0).new_folder("j", self.jobs)
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertTrue(link.is_symlink())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_a_junction_inside_an_engine_folder_is_removed_as_a_link(self):
+        import _winapi
+
+        target = self.tmp / "elsewhere"
+        target.mkdir()
+        (target / "precious.txt").write_text("keep me", encoding="utf-8")
+        store = PreviewStore(self.root)
+        self._write(store.new_folder("j", self.jobs))
+        _winapi.CreateJunction(str(target), str(store.dir / "link"))
+        store.close()
+        self.assertTrue((target / "precious.txt").exists())
+        self.assertFalse(store.dir.exists())
+
+    def test_nothing_is_deleted_if_the_folder_or_marker_changed_once_locked(self):
+        from src.studio import previews
+
+        dead = PreviewStore(self.root, stale_s=0)
+        folder = self._write(dead.new_folder("abc", self.jobs))
+        dead._lock.release()
+        dead._lock = None
+        self._age_marker(dead)
+        with mock.patch.object(previews._FileLock, "holds", return_value=False):  # swapped meanwhile
+            self._store(stale_s=60).new_folder("b", self.jobs)
+        self.assertTrue(folder.exists())
+        self.assertTrue((dead.dir / ".owner.lock").exists())
+
     def test_a_running_engine_is_still_protected_while_its_folder_has_leftovers(self):
         """A marker kept for a retry is never a way into a folder whose engine is running."""
         other_jobs = JobManager(lanes={"audio": 1})

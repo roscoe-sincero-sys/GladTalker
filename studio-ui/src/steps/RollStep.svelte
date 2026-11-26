@@ -103,10 +103,13 @@
     watch.done.then(
       (final) => {
         if (!mine() || !final) return;
+        // Pressing Cancel on this render is proof it was live, so its ending is news at once; the
+        // lookup is only for a render this view merely attached to (from history or a reload).
+        const news = cancelPendingFor === id || wasRunning;
         // The video loads at once; only the announcement waits for the lookup.
-        if (final.state === 'succeeded') loadVideo(final, wasRunning);
-        else if (final.state === 'failed') whenNews(wasRunning, mine, () => announceError(`Render failed: ${final.error || final.message}`));
-        else if (final.state === 'cancelled') whenNews(wasRunning, mine, () => announce('Render cancelled.'));
+        if (final.state === 'succeeded') loadVideo(final, news);
+        else if (final.state === 'failed') whenNews(news, mine, () => announceError(`Render failed: ${final.error || final.message}`));
+        else if (final.state === 'cancelled') whenNews(news, mine, () => announce('Render cancelled.'));
       },
       (err) => {
         // The engine no longer knows this job (it restarted, or dropped it from its history).

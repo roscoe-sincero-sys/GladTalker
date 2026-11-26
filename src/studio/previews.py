@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 import uuid
@@ -42,6 +43,18 @@ LOCK_NAME = ".owner.lock"
 ENGINE_DIR_RE = re.compile(r"^engine-[0-9a-f]{12}$")
 PREVIEW_DIR_RE = re.compile(r"^\d{8}_\d{6}_\d{6}_[0-9A-Za-z]+$")  # what new_folder() names
 STALE_S = 60.0
+
+
+def _is_plain_dir(path: Path) -> bool:
+    """A real directory, not a link to one: symlinks and Windows junctions (and other reparse
+    points) are refused without following them, so cleanup never reaches outside ``previews/``."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        return False  # a symlink (or not a directory at all)
+    return not getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 
 
 class _FileLock:
@@ -71,6 +84,16 @@ class _FileLock:
             return False
         self._file = f
         return True
+
+    def holds(self, path: Path) -> bool:
+        """Whether ``path`` (not followed if it is a link) is still the very file this lock holds."""
+        if self._file is None:
+            return False
+        try:
+            mine, there = os.fstat(self._file.fileno()), os.lstat(path)
+        except OSError:
+            return False
+        return stat.S_ISREG(there.st_mode) and (mine.st_dev, mine.st_ino) == (there.st_dev, there.st_ino)
 
     def release(self) -> None:
         if self._file is None:
@@ -149,8 +172,8 @@ class PreviewStore:
     def _reclaim_others(self) -> None:
         now = time.time()
         for folder in self.root.iterdir():
-            if folder == self.dir or not ENGINE_DIR_RE.match(folder.name) or not folder.is_dir():
-                continue  # not an engine folder Studio made
+            if folder == self.dir or not ENGINE_DIR_RE.match(folder.name) or not _is_plain_dir(folder):
+                continue  # not an engine folder Studio made (a link to one is never followed)
             marker = folder / LOCK_NAME
             try:
                 if not marker.is_file() or now - marker.stat().st_mtime < self.stale_s:
@@ -172,18 +195,22 @@ def _remove_engine_folder(folder: Path, lock: _FileLock) -> bool:
     """Delete an engine folder whose ``.owner.lock`` the caller holds: the previews first, while
     still holding the lock (so no other engine starts on it too), then, only if nothing else is
     left, the marker and the folder. If a file can't be deleted (held open on Windows), the
-    marker stays so a later engine can retry once it is released. Returns whether it is gone."""
+    marker stays so a later engine can retry once it is released. Returns whether it is gone.
+
+    Nothing is deleted unless, with the lock held, the folder is still a real directory (not a
+    link) and its marker is still the very file locked. Links inside it are removed as links;
+    their targets are never entered."""
+    if not _is_plain_dir(folder) or not lock.holds(folder / LOCK_NAME):
+        lock.release()
+        return False
     try:
         for entry in folder.iterdir():
             if entry.name == LOCK_NAME:
                 continue
-            if entry.is_dir() and not entry.is_symlink():
+            if _is_plain_dir(entry):
                 shutil.rmtree(entry, ignore_errors=True)
             else:
-                try:
-                    entry.unlink()
-                except OSError:
-                    pass
+                _remove_link_or_file(entry)
         payload_left = any(entry.name != LOCK_NAME for entry in folder.iterdir())
     except FileNotFoundError:
         payload_left = False  # another engine removed it meanwhile
@@ -199,3 +226,14 @@ def _remove_engine_folder(folder: Path, lock: _FileLock) -> bool:
     except OSError:
         return False  # another engine took the marker in the meantime, or the folder isn't empty
     return True
+
+
+def _remove_link_or_file(entry: Path) -> None:
+    """Remove a file, a symlink, or a Windows junction itself, never what a link points to."""
+    try:
+        entry.unlink()
+    except OSError:
+        try:
+            os.rmdir(entry)  # a junction (or a directory symlink on Windows) is removed as a link
+        except OSError:
+            pass
