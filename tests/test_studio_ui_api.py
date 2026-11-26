@@ -313,7 +313,8 @@ class PreviewRetentionTests(unittest.TestCase):
 
         store = PreviewStore(self.root)
         folder = self._write(store.new_folder("j", self.jobs))
-        with mock.patch.object(previews.shutil, "rmtree"):  # nothing gets deleted
+        # Nothing gets deleted: Windows cleanup goes through shutil.rmtree, POSIX through _remove_at.
+        with mock.patch.object(previews.shutil, "rmtree"), mock.patch.object(previews, "_remove_at"):
             store.close()
         self.assertTrue(folder.exists())
         self.assertTrue((store.dir / ".owner.lock").exists())
@@ -391,16 +392,17 @@ class PreviewRetentionTests(unittest.TestCase):
         dead._lock = None
         self._age_marker(dead)
         moved = dead.dir.with_name("engine-moved000000")
-        real_listdir, swapped = os.listdir, []
+        real_remove_at, swapped = previews._remove_at, []
 
-        def swap_then_list(path=None):
-            if isinstance(path, int) and not swapped:  # the first listing of the opened folder
+        def swap_then_remove(dir_fd, name):
+            if not swapped:  # the folder has been opened, checked and listed: now swap it
                 swapped.append(1)
                 os.rename(dead.dir, moved)
                 os.symlink(target, dead.dir, target_is_directory=True)
-            return real_listdir(path) if path is not None else real_listdir()
+            return real_remove_at(dir_fd, name)
 
-        with mock.patch.object(previews.os, "listdir", swap_then_list):
+        # Only _remove_at is wrapped, so the real os functions pass _fd_relative_supported().
+        with mock.patch.object(previews, "_remove_at", swap_then_remove):
             self._store(stale_s=60).new_folder("b", self.jobs)
         self.assertTrue(swapped)
         self.assertTrue((target / "precious.txt").exists())
@@ -439,7 +441,9 @@ class PreviewRetentionTests(unittest.TestCase):
         dead._lock.release()
         dead._lock = None
         self._age_marker(dead)
-        with mock.patch.object(previews._FileLock, "holds", return_value=False):  # swapped meanwhile
+        # Swapped meanwhile: Windows checks the marker by path (holds), POSIX relative to the
+        # opened folder (holds_at).
+        with mock.patch.object(previews._FileLock, "holds", return_value=False),                 mock.patch.object(previews._FileLock, "holds_at", return_value=False):
             self._store(stale_s=60).new_folder("b", self.jobs)
         self.assertTrue(folder.exists())
         self.assertTrue((dead.dir / ".owner.lock").exists())
