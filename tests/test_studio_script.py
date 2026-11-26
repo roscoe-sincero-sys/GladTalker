@@ -239,6 +239,29 @@ class ParseScriptTests(unittest.TestCase):
         for extra in ("Narrator" * 1_500, "Dr. Moss " + "the Elder " * 1_000):
             self.assertEqual(per_line_work(short + [extra]), baseline, len(extra))
 
+    def test_a_long_near_match_doesnt_make_every_colon_a_candidate(self):
+        """A cast entry that matches almost the whole line (colons and all) keeps the scan going,
+        but labels are only checked where a whole cast name ends, so the work is the input's size,
+        not its length times its colons."""
+        from unittest import mock
+
+        from src.studio import script
+
+        real_key = script.name_key
+        examined = {}
+        for entries in (10, 40, 160):
+            times = ", ".join(f"{h % 12 + 1}:{m:02d}" for h in range(entries) for m in (0, 30))
+            line = f"Dr. Moss (Guest): Meet me at {times}."
+            cast = ["Dr. Moss", "Dr. Moss (Guest)", line[:-6] + " zzz"]
+            processed = []
+            with mock.patch.object(script, "name_key", lambda name: (processed.append(len(name)), real_key(name))[1]):
+                parsed = parse_script(line, cast=cast)
+            self.assertEqual((parsed.lines[0].speaker, parsed.lines[0].text[:7]), ("Dr. Moss (Guest)", "Meet me"))
+            cast_list_work = 2 * sum(len(c) for c in cast)  # normalizing the cast list itself, once
+            examined[len(line)] = sum(processed) - cast_list_work
+        self.assertEqual(len(set(examined.values())), 1, examined)  # the same few label checks at every size
+        self.assertLess(max(examined.values()), 200, examined)
+
     def test_a_huge_run_of_spaces_is_read_once(self):
         from unittest import mock
 

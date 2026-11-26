@@ -61,7 +61,7 @@ def _collapsed(line: str) -> Iterator[tuple[str, int]]:
                 yield ch, m.start() + k
 
 
-def _label_window(line: str, cast_keys: Iterable[str]) -> Optional[tuple[str, list[int], bool]]:
+def _label_window(line: str, cast_keys: Iterable[str]) -> Optional[tuple[str, list[int], bool, list[int]]]:
     """The part of ``line`` that could hold a cast label, read in one pass, or None if no cast
     name can start the line.
 
@@ -70,12 +70,13 @@ def _label_window(line: str, cast_keys: Iterable[str]) -> Optional[tuple[str, li
     emphasis). Reading stops ``_LABEL_SLACK`` non-space characters after the last key still
     possible, so the work depends on the text that can match, never on the length of the dialogue
     or of cast names that don't fit. Returns the window (whitespace collapsed), the index in
-    ``line`` of each of its characters, and whether it reaches the end of the line."""
+    ``line`` of each of its characters, whether it reaches the end of the line, and the window
+    positions where a whole cast name ends (the only places a label's name can end)."""
     keys = [k for k in dict.fromkeys(cast_keys) if k]
     out: list[str] = []
     where: list[int] = []
     alive: list[tuple[str, int]] = []  # (cast key, characters of it matched so far)
-    matched = False
+    ends: list[int] = []
     in_lead = True
     slack = None  # non-space characters still allowed once no key can grow any longer
     for ch, src in _collapsed(line):
@@ -91,23 +92,28 @@ def _label_window(line: str, cast_keys: Iterable[str]) -> Optional[tuple[str, li
             for key, done in alive:
                 if key.startswith(folded, done):
                     if done + len(folded) == len(key):
-                        matched = True  # a whole cast name ends here
+                        if not ends or ends[-1] != position + 1:
+                            ends.append(position + 1)  # a whole cast name ends here
                     else:
                         still.append((key, done + len(folded)))
             alive = still
         if alive or in_lead:
             continue
-        if not matched:
+        if not ends:
             return None
         if slack is None:
             slack = _LABEL_SLACK
         if ch != " ":
             slack -= 1
             if slack <= 0:
-                return "".join(out), where, where[-1] == len(line) - 1
-    if not matched:
+                return "".join(out), where, where[-1] == len(line) - 1, ends
+    if not ends:
         return None
-    return "".join(out), where, True
+    return "".join(out), where, True, ends
+
+
+# What may follow a cast name inside its label: emphasis markers, spaces, and one "(note)".
+_LABEL_TAIL_RE = re.compile(r"[\s*_]*(?:\([^()]{0,60}\))?[\s*_]*")
 
 
 def _cast_line_readings(line: str, cast_keys: Iterable[str]) -> Iterator[tuple[str, tuple[str, ...], Optional[str], Optional[int]]]:
@@ -117,21 +123,29 @@ def _cast_line_readings(line: str, cast_keys: Iterable[str]) -> Iterator[tuple[s
     one:
 
     1. the whole line, as a screenplay header, first as a name, then as "name (note)";
-    2. at each colon within reach, from the last to the first: the part before it as a name, then
-       as "name (note)". The dialogue after the colon is left alone until a label wins.
+    2. at each colon a label can end at, from the last to the first: the part before it as a
+       name, then as "name (note)". The dialogue after the colon is left alone until a label wins.
 
     Only the window that could hold a cast label is read (see ``_label_window``), with whitespace
-    collapsed, so padding never pushes a label out of reach."""
+    collapsed, so padding never pushes a label out of reach. A boundary (a colon, or the end of a
+    header line) is only considered where a whole cast name ends just before it, followed by
+    nothing but emphasis, spaces and a note, so each line costs a few label checks however long a
+    cast name keeps matching it."""
     found = _label_window(line, cast_keys)
     if found is None:
         return
-    window, where, whole = found
-    if whole:
-        yield window, (), None, None
-        if m := _NOTE_RE.match(window):
-            yield m.group("label"), (m.group("close"),), m.group("note"), None
-    for i in range(len(window) - 1, -1, -1):
-        if window[i] != ":":
+    window, where, whole, ends = found
+    boundaries: set[int] = set()
+    for end in ends:
+        tail = _LABEL_TAIL_RE.match(window, end)
+        boundaries.update(i for i in range(end, tail.end() + 1) if i < len(window) and window[i] == ":")
+        if whole and tail.end() == len(window):
+            boundaries.add(len(window))
+    for i in sorted(boundaries, reverse=True):
+        if i == len(window):  # the whole line, as a screenplay header
+            yield window, (), None, None
+            if m := _NOTE_RE.match(window):
+                yield m.group("label"), (m.group("close"),), m.group("note"), None
             continue
         head = window[:i]
         colon = where[i]
