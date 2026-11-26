@@ -134,6 +134,19 @@ class ParseScriptTests(unittest.TestCase):
         self.assertEqual(parsed.unknown_speakers, [])
         self.assertEqual(self._render_speakers(cast, parsed), expected)
 
+    def test_balanced_emphasis_means_the_same_speaker_inline_and_as_a_header(self):
+        """The whole label is compared first ("_Crew" is _Crew), then one matched pair of emphasis
+        markers is removed ("_Crew_" is emphasised Crew), the same way on both kinds of line."""
+        cast = ["Crew", "_Crew"]
+        parsed = parse_script("_Crew_: Hello.\n_Crew: Hi.\n**_Crew_**: Hey.\n**Crew:** Yo.\n\n"
+                              "_Crew_\nFrom the header.\n\n_Crew\nFrom the other header.", cast=cast)
+        expected = [("Crew", "Hello."), ("_Crew", "Hi."),
+                    ("Crew", "Hey."),  # bold around italic Crew
+                    ("Crew", "Yo."), ("Crew", "From the header."), ("_Crew", "From the other header.")]
+        self.assertEqual([(l.speaker, l.text) for l in parsed.lines], expected)
+        self.assertEqual(parsed.unknown_speakers, [])
+        self.assertEqual(self._render_speakers(cast, parsed), expected)
+
     def test_emphasis_is_still_stripped_from_names_outside_the_cast(self):
         r = parse_script("_Narrator_: Meanwhile.\n**Brain**: Hi.", cast=["Brain"])
         self.assertEqual([l.speaker for l in r.lines], ["Narrator", "Brain"])

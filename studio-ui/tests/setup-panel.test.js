@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 
-const calls = vi.hoisted(() => ({ models: [] }));
+const calls = vi.hoisted(() => ({ models: [], hardwareModels: null }));
 
 vi.mock('../src/lib/api.js', async (importOriginal) => {
   const real = await importOriginal();
@@ -11,18 +11,30 @@ vi.mock('../src/lib/api.js', async (importOriginal) => {
     api: {
       models: () => {
         const next = calls.models.shift();
-        return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+        if (next instanceof Error) return Promise.reject(next);
+        return next?.promise ?? Promise.resolve(next);
       },
+      health: async () => ({ version: 'test' }),
+      hardware: async () => ({ ffmpeg: { available: true }, models: calls.hardwareModels }),
+      voices: async () => ({ presets: [], semitone_range: [-6, 6] }),
     },
   };
 });
 
-const { engine, pollBusyModels } = await import('../src/lib/app-state.svelte.js');
+const { engine, connectEngine, pollBusyModels, refreshModels } = await import('../src/lib/app-state.svelte.js');
 const SetupPanel = (await import('../src/components/SetupPanel.svelte')).default;
 
 const file = (name, extra = {}) => ({ path: `w/${name}`, name, ready: false, busy: false, damaged: false, incomplete: false, ...extra });
 const busyStatus = () => ({ complete: false, ready: 1, busy: 1, total: 2,
   files: [file('a.pth', { ready: true }), file('b.pth', { busy: true })] });
+const missingStatus = () => ({ complete: false, ready: 1, busy: 0, total: 2,
+  files: [file('a.pth', { ready: true }), file('b.pth')] });
+/** A models() answer the test releases later, like a slow request. */
+function held() {
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  return { promise, release };
+}
 const readyStatus = () => ({ complete: true, ready: 2, busy: 0, total: 2,
   files: [file('a.pth', { ready: true }), file('b.pth', { ready: true })] });
 
@@ -69,6 +81,42 @@ describe('busy models', () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(requests).toBe(1);
     spy.mockRestore();
+  });
+
+  it('an earlier poll answering after the download finished does not bring Setup back', async () => {
+    const early = held();
+    calls.models = [early, readyStatus()];
+    const poller = pollBusyModels({ delayMs: 1000 });
+    await vi.advanceTimersByTimeAsync(1000); // the poll is now waiting on a slow answer
+    await refreshModels(); // the download job finished: everything is ready
+    expect(engine.models.complete).toBe(true);
+    early.release(missingStatus()); // the stale answer arrives last
+    await vi.advanceTimersByTimeAsync(0);
+    expect(engine.models.complete).toBe(true);
+    poller.stop();
+  });
+
+  it('drops the answer to a poll that was stopped (Setup closed) while it was pending', async () => {
+    const early = held();
+    calls.models = [early];
+    const poller = pollBusyModels({ delayMs: 1000 });
+    await vi.advanceTimersByTimeAsync(1000);
+    poller.stop();
+    early.release(missingStatus());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(engine.models).toEqual(busyStatus());
+  });
+
+  it('drops answers from before a reconnect', async () => {
+    const stale = held();
+    calls.models = [stale];
+    const pending = refreshModels();
+    calls.hardwareModels = readyStatus();
+    await connectEngine();
+    expect(engine.models.complete).toBe(true);
+    stale.release(missingStatus());
+    await pending;
+    expect(engine.models.complete).toBe(true);
   });
 
   it('Setup lists busy files as being checked, without a download button', async () => {

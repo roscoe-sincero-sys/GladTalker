@@ -11,7 +11,7 @@ from unittest import mock
 
 from scripts import download_models as dm
 from src.studio.hardware import models_status
-from tests._file_locks import exclusive_open, windows_only
+from tests._file_locks import exclusive_open, range_lock, windows_only
 
 
 class FakeResponse:
@@ -409,6 +409,28 @@ class VerificationStateTests(unittest.TestCase):
                 holder.seek(0)
                 msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, len(self.data))
 
+    @windows_only
+    def test_lock_beyond_the_first_read_after_warming_the_cache_is_busy(self):
+        """A cached digest can't vouch for a file that another program has locked anywhere in it,
+        not just where a first read would land."""
+        self.data = os.urandom(3 * 1024 * 1024)  # bigger than one buffered read
+        self.expected = (len(self.data), hashlib.sha256(self.data).hexdigest())
+        self.dest.write_bytes(self.data)
+        self._age()
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        with range_lock(self.dest, offset=len(self.data) - 4096, length=4096):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.BUSY)
+            self.assertEqual(dm.verification_state(self.dest, self.expected, use_cache=False), dm.BUSY)
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+
+    @windows_only
+    def test_another_readers_shared_lock_does_not_make_a_file_busy(self):
+        self.dest.write_bytes(self.data)
+        self._age()
+        self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+        with range_lock(self.dest, offset=0, length=len(self.data), exclusive=False):
+            self.assertEqual(dm.verification_state(self.dest, self.expected), dm.READY)
+
 
 class DownloadJobTests(unittest.TestCase):
     def setUp(self):
@@ -455,22 +477,46 @@ class DownloadJobTests(unittest.TestCase):
         self.assertNotIn("All models", result["message"])
         self.assertEqual(self.busy.read_bytes(), b"X" + self.data[1:], "a busy file is left alone")
 
-    def test_file_that_becomes_busy_during_its_download_is_deferred(self):
+    def test_destination_locked_at_publish_is_deferred(self):
         from src.studio.hardware import download_models
 
-        real_publish, became_busy = dm._publish, []
+        real_replace = os.replace
 
-        def publish(tmp_path, dest, expected, *args, **kw):
-            if Path(dest) == self.busy:
-                became_busy.append(1)  # another program grabbed it while we downloaded
+        def replace(src, dst, *args, **kwargs):
+            if Path(dst) == self.busy:  # another program grabbed it while we downloaded
                 raise PermissionError(13, "in use")
-            return real_publish(tmp_path, dest, expected, *args, **kw)
+            return real_replace(src, dst, *args, **kwargs)
 
-        with self._busy_when(lambda: bool(became_busy)), self._serve(), \
-                mock.patch.object(dm, "_publish", publish):
+        with self._serve(), mock.patch.object(dm.os, "replace", replace), mock.patch.object(dm.time, "sleep"):
             result = download_models(mock.MagicMock(), root=self.root)
         self.assertEqual(result["deferred"], ["w/busy.pth"])
         self.assertEqual(result["downloaded"], ["w/missing.pth"])
+        self.assertFalse(self.busy.exists())
+        self.assertEqual([p.name for p in self.busy.parent.iterdir() if p.suffix == ".part"], [])
+
+    def test_network_failure_is_reported_even_if_the_file_turns_busy_meanwhile(self):
+        """A timeout is a download failure, whatever state the destination is in by then."""
+        from src.studio.hardware import download_models
+        from src.studio.jobs import UserFacingError
+
+        timed_out = []
+
+        def urlopen(*args, **kwargs):
+            timed_out.append(1)  # ...and another program locks the destination at the same moment
+            raise OSError(110, "timed out")
+
+        with self._busy_when(lambda: bool(timed_out)), mock.patch.object(dm.urllib.request, "urlopen", urlopen):
+            with self.assertRaisesRegex(UserFacingError, "Couldn't download busy.pth: timed out"):
+                download_models(mock.MagicMock(), root=self.root)
+
+    def test_download_file_reports_a_busy_destination_as_such(self):
+        self.busy.parent.mkdir(parents=True)
+        self.busy.write_bytes(self.data)
+        with self._busy_when(lambda: True), self._serve() as urlopen:
+            with self.assertRaises(dm.DestinationBusyError):
+                dm.download_file("https://example.invalid/busy", self.busy, progress=lambda d, t: None,
+                                 expected=dm.expected_for("w/busy.pth"))
+        urlopen.assert_not_called()
 
     def test_a_real_download_failure_is_still_an_error(self):
         from src.studio.hardware import download_models

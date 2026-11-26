@@ -212,6 +212,47 @@ def is_verified(dest: Path, expected: Optional[tuple[int, str]], use_cache: bool
     return file_digest(dest, use_cache=use_cache) == expected[1]
 
 
+class DestinationBusyError(PermissionError):
+    """The destination file is in use (being replaced, or locked by another program), so it can't
+    be checked or replaced right now. Unlike a network or disk failure, this is worth retrying."""
+
+
+def _whole_file_readable(f, size: int) -> bool:
+    """Whether no other program holds a lock that would stop reading any part of the open file.
+
+    On Windows, a byte-range lock anywhere in the file makes reads of that range fail, so reading
+    the first byte is not enough. Take (and at once release) a *shared* lock on the whole file
+    without waiting: it is refused exactly when someone holds an exclusive lock on part of it, and
+    other readers' shared locks don't get in its way. Elsewhere, locks are advisory and never stop
+    a read, so the first byte is all there is to check."""
+    if f.read(1) == b"" and size:
+        return False  # shorter than its metadata says: being rewritten
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _Overlapped(ctypes.Structure):
+        _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
+                    ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD), ("hEvent", wintypes.HANDLE)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                    wintypes.DWORD, ctypes.POINTER(_Overlapped)]
+    kernel32.UnlockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                      ctypes.POINTER(_Overlapped)]
+    handle = msvcrt.get_osfhandle(f.fileno())
+    length = max(size, 1)
+    low, high = length & 0xFFFFFFFF, length >> 32
+    overlapped = _Overlapped()
+    lockfile_fail_immediately = 0x1  # and not LOCKFILE_EXCLUSIVE_LOCK: a shared lock
+    if not kernel32.LockFileEx(handle, lockfile_fail_immediately, 0, low, high, ctypes.byref(overlapped)):
+        return False
+    kernel32.UnlockFileEx(handle, 0, low, high, ctypes.byref(overlapped))
+    return True
+
+
 MISSING, INCOMPLETE, READY, DAMAGED, BUSY = "missing", "incomplete", "ready", "damaged", "busy"
 
 
@@ -229,7 +270,8 @@ def verification_state(dest: Path, expected: Optional[tuple[int, str]], use_cach
 
     The size, the cache lookup and the digest all come from the same open handle, and the result
     only counts if the path still names that file afterwards; otherwise it is retried. Even a
-    cached digest needs the file to open and read, so a locked file is never reported ready."""
+    cached digest needs the whole file to be readable (no other program's lock on any part of it),
+    so a locked file is never reported ready."""
     dest = Path(dest)
     for attempt in range(attempts):
         cached = None
@@ -250,7 +292,9 @@ def verification_state(dest: Path, expected: Optional[tuple[int, str]], use_cach
                     if use_cache and expected is not None:
                         cached = _cached_digest(dest, before)
                     if cached is not None or expected is None:
-                        f.read(1)  # still readable: not locked by another program
+                        # Nothing to hash, but the file must still be readable end to end now.
+                        if not _whole_file_readable(f, before.st_size):
+                            continue
                         digest, after = cached, before
                     else:
                         digest = _hash_open_file(f)
@@ -293,7 +337,8 @@ def _publish(tmp_path: Path, dest: Path, expected: Optional[tuple[int, str]], at
                 tmp_path.unlink(missing_ok=True)
                 return
             if attempt == attempts - 1:
-                raise
+                raise DestinationBusyError(
+                    13, f"{dest.name} is in use by another program, so it couldn't be replaced", str(dest))
             time.sleep(0.2)
 
 
@@ -310,16 +355,24 @@ def download_file(
     ``expected=(size, sha256)`` is given, its size and SHA-256 match too. An existing ``dest``
     is skipped only if it verifies (so truncated or damaged files from older runs are repaired).
 
+    Raises DestinationBusyError only when the destination itself is in use: it can't be checked
+    before downloading, or can't be replaced afterwards. Network, integrity and
+    temporary-file failures raise their own errors.
+
     Args:
         progress: Optional callback ``progress(downloaded_bytes, total_bytes_or_None)`` invoked
             after every chunk. When given, console progress output is suppressed. The callback
             may raise to abort the download; the partial file is removed.
     """
     dest = Path(dest)
-    if not force and is_verified(dest, expected):
+    state = None if force else verification_state(dest, expected)
+    if state == READY:
         if progress is None:
-            print(f"[skip] {dest} ({_format_bytes(dest.stat().st_size)}, verified)")
+            print(f"[skip] {dest} (verified)")
         return
+    if state == BUSY:
+        raise DestinationBusyError(
+            13, f"{dest.name} is being updated or is in use by another program; try again shortly", str(dest))
     if dest.exists() and not force and progress is None:
         print(f"[repair] {dest} is incomplete or damaged; downloading again")
 

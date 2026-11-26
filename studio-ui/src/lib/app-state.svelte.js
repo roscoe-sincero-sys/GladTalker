@@ -24,16 +24,28 @@ export const engine = $state({
 
 export const nav = $state({ step: 'cast' });
 
+// Model status can be fetched by several callers at once (the busy poll, the end of a download,
+// a reconnect), and answers can arrive out of order. Each request is numbered; an answer is shown
+// only if nothing newer has been shown and the engine hasn't been reconnected since it was asked.
+let modelsSession = 0;
+let modelsRequested = 0;
+let modelsShown = 0;
+
 /** Connect to the engine. In the desktop app, the shell first starts it (or reports why it
  * can't); `restart` stops and starts it again. */
 export async function connectEngine({ restart = false } = {}) {
   engine.status = 'connecting';
+  modelsSession += 1; // answers to model-status requests sent before this connection are stale
   if (isDesktop() && !(await startDesktopEngine(restart ? 'restart_engine' : 'start_engine'))) return;
+  const modelsId = ++modelsRequested;
   try {
     const [health, hardware, voices] = await Promise.all([api.health(), api.hardware(), api.voices()]);
     engine.version = health.version;
     engine.hardware = hardware;
-    engine.models = hardware.models;
+    if (modelsId >= modelsShown) {
+      modelsShown = modelsId;
+      engine.models = hardware.models;
+    }
     engine.voices = voices.presets;
     engine.semitoneRange = voices.semitone_range;
     engine.status = 'ready';
@@ -71,9 +83,17 @@ export async function chooseEngineFolder() {
   if (engine.status === 'connecting') engine.status = previous; // cancelled
 }
 
-export async function refreshModels() {
+/** Fetch the model status into `engine.models`, unless a newer answer is already shown, the engine
+ * was reconnected meanwhile, or `isCurrent()` (e.g. "the panel that asked is still open") is false.
+ * A failed request keeps the last known state. */
+export async function refreshModels({ isCurrent = () => true } = {}) {
+  const id = ++modelsRequested;
+  const session = modelsSession;
   try {
-    engine.models = await api.models();
+    const status = await api.models();
+    if (session !== modelsSession || id < modelsShown || !isCurrent()) return;
+    modelsShown = id;
+    engine.models = status;
   } catch {
     /* keep the last known state */
   }
@@ -93,7 +113,7 @@ export function pollBusyModels({ delayMs = 3000 } = {}) {
       timer = null;
       inFlight = true;
       try {
-        await refreshModels();
+        await refreshModels({ isCurrent: () => !stopped }); // a stopped poll's answer is dropped
       } finally {
         inFlight = false;
       }

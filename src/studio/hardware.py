@@ -153,10 +153,11 @@ def models_status(root: Path = REPO_ROOT) -> dict:
 def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False) -> dict:
     """Job body: fetch every missing, incomplete or damaged model file (``force``: every file),
     reporting per-file byte progress. A file that is busy (being replaced, or locked by another
-    program) is not something to repair: it is skipped, rechecked just before its turn and again
-    if its download fails, and reported in ``deferred`` while the rest of the queue proceeds."""
-    from scripts.download_models import (BUSY, READY, DownloadIntegrityError, download_file, expected_for,
-                                         verification_state)
+    program) is not something to repair: it is skipped, rechecked just before its turn, deferred if
+    the downloader reports the destination busy (DestinationBusyError, never a network or disk
+    failure), and listed in ``deferred`` while the rest of the queue proceeds."""
+    from scripts.download_models import (BUSY, READY, DestinationBusyError, DownloadIntegrityError, download_file,
+                                         expected_for, verification_state)
 
     def state_of(rel: str) -> str:
         return verification_state(Path(root) / rel, expected_for(rel))
@@ -193,13 +194,13 @@ def download_models(ctx: JobContext, root: Path = REPO_ROOT, force: bool = False
         ctx.progress(i / len(todo), f"Downloading {name} ({i + 1} of {len(todo)})…", stage=name)
         try:
             download_file(url, Path(root) / rel, force=force, progress=on_chunk, expected=expected_for(rel))
+        except DestinationBusyError:  # only the destination being in use, never a download failure
+            deferred.append(rel)
+            ctx.log(f"Skipped {rel}: it became busy, so it couldn't be checked or replaced")
+            continue
         except DownloadIntegrityError as exc:
             raise UserFacingError(str(exc)) from exc
-        except OSError as exc:  # URLError, timeouts, disk full... or the file became busy
-            if state_of(rel) == BUSY:
-                deferred.append(rel)
-                ctx.log(f"Skipped {rel}: it became busy while it was being replaced")
-                continue
+        except OSError as exc:  # URLError, timeouts, disk full, temporary-file problems...
             reason = getattr(exc, "reason", None) or exc.strerror or exc
             raise UserFacingError(
                 f"Couldn't download {name}: {reason}. Check your internet connection and free disk "

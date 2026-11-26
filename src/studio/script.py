@@ -38,37 +38,39 @@ _SPEAKER_LINE_RE = re.compile(
 _HAS_LETTER_RE = re.compile(r"[^\W\d_]")
 
 
-_EMPH = r"(?:\*\*|__|\*|_)?"
-# Lazy: try the line *without* an opening emphasis marker first, so a cast name that starts with
-# an underscore ("_Crew") wins over a shorter name wrapped in emphasis ("Crew").
-_OPEN_EMPH = r"(?:\*\*|__|\*|_)??"
+_EMPHASIS = ("**", "__", "*", "_")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•>]\s+)?")
+# "<label> (note)<closing emphasis>:<closing emphasis> text"; the label is everything before the
+# colon (or the parenthetical), so a cast name is compared whole, never by prefix.
+_LABELLED_RE = re.compile(
+    r"^(?P<label>[^:()]+)(?:\((?P<note>[^)]{0,60})\))?\s*(?P<close>\*\*|__|\*|_)?\s*:"
+    r"(?P<after>\*\*|__|\*|_)?\s*(?P<text>.*)$"
+)
 
 
-def _known_speaker_re(cast: list[str]) -> Optional[re.Pattern]:
-    """Same shape as _SPEAKER_LINE_RE, but the name must be one of the cast (any length, any
-    case, flexible spacing). Tried first so long names like "The Man in the Hat" are recognised
-    instead of being folded into the previous speaker's line. Longest names win, and a name's own
-    underscores ("Crew_", "_Crew") are kept rather than read as Markdown emphasis."""
-    if not cast:
-        return None
-    names = sorted({c for c in cast if c.strip()}, key=len, reverse=True)
-    alternatives = "|".join(r"\s+".join(re.escape(part) for part in n.split()) for n in names)
-    return re.compile(
-        rf"^\s*(?:[-*•>]\s+)?{_OPEN_EMPH}\s*"
-        rf"(?P<name>{alternatives})"
-        rf"\s*{_EMPH}\s*(?:\((?P<note>[^)]{{0,60}})\))?\s*{_EMPH}\s*:{_EMPH}"
-        r"\s*(?P<text>.*)$",
-        re.IGNORECASE,
-    )
+def _label_candidates(label: str, closers: Iterable[str] = ()) -> list[str]:
+    """Ways to read a speaker label as a name, most literal first:
 
+    1. the label as typed ("_Crew", "Crew_");
+    2. without one matched pair of emphasis markers, keeping everything inside ("_Crew_" -> "Crew",
+       "**_Crew**" -> "_Crew"), where the closing marker may also come after a parenthetical or
+       the colon ("**Brain:**");
+    3. without any emphasis markers at either end (the old, permissive reading).
 
-def _header_candidates(line: str) -> list[str]:
-    """Ways to read a screenplay header line ("BRAIN", "**Crew_:**") as a bare name, most literal
-    first: as typed, then without asterisks, then without any emphasis markers."""
-    literal = line.strip().rstrip(":").strip()
-    no_stars = literal.strip("* ").rstrip(":").strip("* ")
-    bare = literal.strip("*_ ").rstrip(":").strip("*_ ")
-    return list(dict.fromkeys(c for c in (literal, no_stars, bare) if c))
+    Inline speakers and screenplay headers both use this order, so a label means the same
+    speaker wherever it appears."""
+    label = label.strip()
+    closers = {c for c in closers if c}
+    found = [label]
+    for marker in _EMPHASIS:
+        if not label.startswith(marker):
+            continue
+        if label.endswith(marker) and len(label) > 2 * len(marker):
+            found.append(label[len(marker):-len(marker)].strip())
+        elif marker in closers:
+            found.append(label[len(marker):].strip())
+    found.append(label.strip("*_ ").strip())
+    return [c for c in dict.fromkeys(found) if c]
 
 
 @dataclass
@@ -165,7 +167,14 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
     for c in cast_list:
         canonical.setdefault(name_key(c), c)
     canonical_cast = set(canonical)  # keys of the cast itself (canonical also learns other names)
-    known_re = _known_speaker_re(cast_list)
+
+    def cast_member(label: str, closers: Iterable[str] = ()) -> Optional[str]:
+        """The cast member a label names, compared with name_key (full Unicode case folding and
+        any spacing, exactly as render matching does), or None."""
+        for candidate in _label_candidates(label, closers):
+            if (key := name_key(candidate)) in canonical_cast:
+                return canonical[key]
+        return None
 
     lines: list[ParsedLine] = []
     pending_speaker: Optional[str] = None
@@ -187,15 +196,25 @@ def parse_script(text: str, cast: Iterable[str] = ()) -> ParseResult:
             current = None  # a blank line ends continuation
             continue
 
-        # Screenplay style: a line that is just a known cast name (optionally with a colon).
-        # Compared with name_key (full Unicode case folding, so "STRASSE" is "Straße"), trying the
-        # literal label before stripping emphasis, so "_Crew" stays "_Crew" when it is in the cast.
-        header = next((c for c in _header_candidates(stripped) if name_key(c) in canonical_cast), None)
-        if header is not None:
-            pending_speaker, pending_note, current = canonical[name_key(header)], None, None
+        # A cast member's label: "Name: text", "- **Name** (note): text", or a screenplay header
+        # (just the name, optionally with a colon) that sets the speaker for the following lines.
+        labelled = _LABELLED_RE.match(raw[_BULLET_RE.match(raw).end():]) if cast_list else None
+        if labelled:
+            speaker = cast_member(labelled.group("label"), (labelled.group("close"), labelled.group("after")))
+        else:
+            speaker = cast_member(stripped) if cast_list and ":" not in stripped else None
+        if speaker is not None and not (labelled and labelled.group("text").strip()):
+            pending_speaker, pending_note, current = speaker, None, None
+            continue
+        if speaker is not None:
+            note = labelled.group("note")
+            current = ParsedLine(index=len(lines), speaker=speaker, text=labelled.group("text").strip(),
+                                 note=note.strip() if note else None, source_line=lineno)
+            lines.append(current)
+            pending_speaker = None
             continue
 
-        m = (known_re.match(raw) if known_re else None) or _match_speaker_line(raw)
+        m = _match_speaker_line(raw)
         if m:
             speaker = canon(m.group("name"))
             body = m.group("text").strip()

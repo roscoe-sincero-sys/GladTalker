@@ -2,6 +2,7 @@ import asyncio
 import threading
 import time
 import unittest
+from unittest import mock
 
 from src.studio.jobs import JobCancelled, JobManager, UserFacingError
 
@@ -106,6 +107,36 @@ class JobManagerTests(unittest.TestCase):
         seqs = [e["seq"] for e in events]
         self.assertEqual(seqs, sorted(set(seqs)), "no duplicates, in order")
         self.assertIn("half", [e["job"]["message"] for e in events])
+
+
+class ExplainLoadFailureTests(unittest.TestCase):
+    def test_busy_or_damaged_files_explain_the_failure(self):
+        from src.studio.jobs import RetryLaterError, UserFacingError, explain_load_failure
+
+        for found in (RetryLaterError("busy, try again"), UserFacingError("damaged, repair")):
+            def recheck(found=found):
+                raise found
+
+            with self.assertRaises(type(found)) as caught:
+                with explain_load_failure(recheck):
+                    raise RuntimeError("PytorchStreamReader failed")
+            self.assertIs(caught.exception, found)
+            self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+
+    def test_healthy_files_leave_the_original_error_and_cancellation_alone(self):
+        from src.studio.jobs import JobCancelled, explain_load_failure
+
+        recheck = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            with explain_load_failure(recheck):
+                raise RuntimeError("boom")
+        recheck.assert_called_once()
+        recheck.reset_mock()
+        with self.assertRaises(JobCancelled):
+            with explain_load_failure(recheck):
+                raise JobCancelled()
+        recheck.assert_not_called()
+
 
 
 if __name__ == "__main__":

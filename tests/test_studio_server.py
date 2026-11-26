@@ -17,7 +17,7 @@ from src.studio import pipeline
 from src.studio.faces import FaceBox
 from src.studio.jobs import JobManager
 from src.studio.server import DEFAULT_HOSTS, DEFAULT_ORIGINS, StudioConfig, StudioServices, create_app
-from tests._file_locks import exclusive_open, windows_only
+from tests._file_locks import exclusive_open, range_lock, windows_only
 
 REAL_CHECK_MODELS = pipeline.check_models  # setUp stubs it out for most tests
 
@@ -477,6 +477,46 @@ class StudioServerTests(unittest.TestCase):
             self.assertEqual(r.status_code, 503, r.text)
         init.assert_not_called()
         self.assertTrue(self.client.get("/models").json()["complete"])
+
+    @windows_only
+    def test_lock_late_in_a_cached_checkpoint_is_busy_not_ready(self):
+        root = self._install_models()
+        self._age_models(root)
+        self.assertTrue(self.client.get("/models").json()["complete"])  # warms the digest cache
+        path = root / self.DETECTOR_REL
+        with range_lock(path, offset=path.stat().st_size - 16, length=16),                 mock.patch("facexlib.detection.init_detection_model") as init:
+            entry = next(f for f in self.client.get("/models").json()["files"] if f["path"] == self.DETECTOR_REL)
+            self.assertEqual(entry["state"], "busy")
+            r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+            self.assertEqual(r.status_code, 503, r.text)
+        init.assert_not_called()
+
+    @windows_only
+    def test_lock_taken_while_the_detector_loads_gets_retry_advice(self):
+        """Verification passed, then another program locked the weights before the loader read
+        them: the load error becomes the retryable 503, not a 500."""
+        import contextlib
+
+        root = self._install_models()
+        path = root / self.DETECTOR_REL
+        with contextlib.ExitStack() as held:
+            def load(*args, **kwargs):
+                held.enter_context(range_lock(path, offset=0, length=path.stat().st_size))
+                raise RuntimeError("PytorchStreamReader failed reading file")
+
+            with mock.patch("facexlib.detection.init_detection_model", side_effect=load):
+                r = self.client.post("/cast/detect", json={"image_path": str(self.image)})
+        self.assertEqual(r.status_code, 503, r.text)
+        self.assertTrue(r.json()["retryable"])
+        self.assertIn("Try Auto-Cast again in a moment", r.json()["detail"])
+
+    def test_load_failure_with_healthy_weights_is_not_disguised(self):
+        self._install_models()
+        with mock.patch("facexlib.detection.init_detection_model", side_effect=RuntimeError("boom")):
+            client = TestClient(create_app(self.config, self.services), raise_server_exceptions=False)
+            r = client.post("/cast/detect", json={"image_path": str(self.image)})
+            client.close()
+        self.assertEqual(r.status_code, 500)
 
     def test_unopenable_checkpoint_is_busy_not_damaged(self):
         """Portable version of the lock test: every model refuses to open (sharing violation)."""

@@ -187,7 +187,7 @@ class FaceDetectorService:
         self._net = None
         self._lock = threading.Lock()
 
-    def check_model(self) -> None:
+    def check_model(self, use_cache: bool = True) -> None:
         """Verify the RetinaFace weights against their pinned size and SHA-256 before facexlib
         touches them: facexlib would silently use a damaged file, or download a missing one with
         no checksum. Only this one file is required, so casting works before render models are
@@ -197,7 +197,7 @@ class FaceDetectorService:
         from src.studio.jobs import RetryLaterError, UserFacingError
 
         path = Path(self.model_root) / DETECTOR_WEIGHTS
-        state = verification_state(path, expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}"))
+        state = verification_state(path, expected_for(f"gfpgan/weights/{DETECTOR_WEIGHTS}"), use_cache=use_cache)
         if state == MISSING:
             raise UserFacingError(
                 f"The face-detection model ({DETECTOR_WEIGHTS}) isn't downloaded yet. "
@@ -218,10 +218,14 @@ class FaceDetectorService:
         if self._net is None:
             from facexlib.detection import init_detection_model
 
+            from src.studio.jobs import explain_load_failure
+
             self.check_model()
-            self._net = init_detection_model(
-                "retinaface_resnet50", half=False, device=self.device, model_rootpath=self.model_root
-            )
+            # A lock taken after the check above still gets retry advice rather than a bare error.
+            with explain_load_failure(lambda: self.check_model(use_cache=False)):
+                self._net = init_detection_model(
+                    "retinaface_resnet50", half=False, device=self.device, model_rootpath=self.model_root
+                )
         return self._net
 
     def detect(self, image_bgr: np.ndarray, min_confidence: float = 0.2, max_faces: int = 8) -> list[FaceBox]:
