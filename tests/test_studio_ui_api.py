@@ -277,6 +277,61 @@ class PreviewRetentionTests(unittest.TestCase):
         store.close()
         self.assertFalse(store.dir.exists())
 
+    def _age_marker(self, store):
+        old = time.time() - 120  # clearly stale (see test_a_dead_engines_folder_is_reclaimed_once_stale)
+        os.utime(store.dir / ".owner.lock", (old, old))
+
+    @unittest.skipUnless(os.name == "nt", "Windows refuses to delete a file that is held open")
+    def test_a_preview_held_open_at_shutdown_keeps_its_marker_until_a_later_engine_cleans_up(self):
+        store = PreviewStore(self.root)
+        wav = self._write(store.new_folder("j", self.jobs)) / "preview.wav"
+        with open(wav, "rb"):  # e.g. a media player still has it open
+            store.close()
+            self.assertTrue(wav.exists())
+            self.assertTrue((store.dir / ".owner.lock").exists(), "the proof a later engine needs to retry")
+        self._age_marker(store)
+        self._store(stale_s=60).new_folder("k", self.jobs)  # the next engine, once the file is released
+        self.assertFalse(store.dir.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows refuses to delete a file that is held open")
+    def test_reclaiming_a_dead_engine_retries_after_a_held_preview_is_released(self):
+        dead = PreviewStore(self.root, stale_s=0)
+        wav = self._write(dead.new_folder("abc", self.jobs)) / "preview.wav"
+        dead._lock.release()  # its process ended
+        dead._lock = None
+        self._age_marker(dead)
+        with open(wav, "rb"):
+            self._store(stale_s=60).new_folder("b", self.jobs)
+            self.assertTrue(wav.exists())
+            self.assertTrue((dead.dir / ".owner.lock").exists())
+        self._store(stale_s=60).new_folder("c", self.jobs)
+        self.assertFalse(dead.dir.exists())
+
+    def test_a_preview_that_cant_be_deleted_keeps_the_marker(self):
+        """Portable version of the held-file tests: the preview's folder refuses to go."""
+        from src.studio import previews
+
+        store = PreviewStore(self.root)
+        folder = self._write(store.new_folder("j", self.jobs))
+        with mock.patch.object(previews.shutil, "rmtree"):  # nothing gets deleted
+            store.close()
+        self.assertTrue(folder.exists())
+        self.assertTrue((store.dir / ".owner.lock").exists())
+        self._age_marker(store)
+        self._store(stale_s=60).new_folder("k", self.jobs)
+        self.assertFalse(store.dir.exists())
+
+    def test_a_running_engine_is_still_protected_while_its_folder_has_leftovers(self):
+        """A marker kept for a retry is never a way into a folder whose engine is running."""
+        other_jobs = JobManager(lanes={"audio": 1})
+        self.addCleanup(other_jobs.shutdown)
+        other = self._store(stale_s=0)
+        theirs = self._write(other.new_folder(self._finished_job(other_jobs).id, other_jobs))
+        self._age_marker(other)
+        self._store(stale_s=60).new_folder("a", self.jobs)
+        self.assertTrue(theirs.exists())
+        self.assertTrue((other.dir / ".owner.lock").exists())
+
 
 class TwoEnginesOneWorkspaceTests(unittest.TestCase):
     """Two engines on one workspace (two ports, or the e2e suite): a preview in one must not

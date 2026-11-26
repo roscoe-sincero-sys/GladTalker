@@ -19,6 +19,11 @@ generates.
 
 When an engine shuts down cleanly it deletes its own folder: nothing in it can be fetched once
 its jobs are gone.
+
+Deleting an engine folder (at shutdown, or when reclaiming a dead engine's) removes the previews
+first and the ``.owner.lock`` marker last, and only once nothing else is left. On Windows a file
+another program holds open (a media player, an antivirus scan) can't be deleted; its folder then
+keeps its marker, which is the proof a later engine needs to retry once the file is released.
 """
 
 from __future__ import annotations
@@ -110,9 +115,8 @@ class PreviewStore:
     def close(self) -> None:
         with self._mutex:
             if self._lock is not None:
-                self._lock.release()
-                self._lock = None
-                shutil.rmtree(self.dir, ignore_errors=True)
+                lock, self._lock = self._lock, None
+                _remove_engine_folder(self.dir, lock)
 
     # -- internals -------------------------------------------------------------------------------
     def _claim(self) -> None:
@@ -161,5 +165,37 @@ class PreviewStore:
                 continue  # another engine reclaimed this folder first: nothing left to do
             except OSError:
                 continue  # can't tell (permissions, a share hiccup): leave it for next time
-            lock.release()
-            shutil.rmtree(folder, ignore_errors=True)
+            _remove_engine_folder(folder, lock)
+
+
+def _remove_engine_folder(folder: Path, lock: _FileLock) -> bool:
+    """Delete an engine folder whose ``.owner.lock`` the caller holds: the previews first, while
+    still holding the lock (so no other engine starts on it too), then, only if nothing else is
+    left, the marker and the folder. If a file can't be deleted (held open on Windows), the
+    marker stays so a later engine can retry once it is released. Returns whether it is gone."""
+    try:
+        for entry in folder.iterdir():
+            if entry.name == LOCK_NAME:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+        payload_left = any(entry.name != LOCK_NAME for entry in folder.iterdir())
+    except FileNotFoundError:
+        payload_left = False  # another engine removed it meanwhile
+    except OSError:
+        payload_left = True  # can't tell: keep the marker
+    finally:
+        lock.release()
+    if payload_left:
+        return False
+    try:
+        (folder / LOCK_NAME).unlink(missing_ok=True)
+        folder.rmdir()
+    except OSError:
+        return False  # another engine took the marker in the meantime, or the folder isn't empty
+    return True

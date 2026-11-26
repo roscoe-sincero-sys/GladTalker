@@ -229,14 +229,17 @@ test('a late Cancel acknowledgement never brings back a render that has already 
   await page.getByRole('button', { name: /Render video/ }).click();
   await expect(page.getByText('Rendering Ann: animating frame 5 of 50')).toBeVisible();
 
+  const polite = page.locator('[role="status"][aria-live="polite"]').last();
   const release = await hold(page, `**/jobs/${id}/cancel`,
     (route) => route.fulfill({ json: renderSnapshot(id, 'running', { cancel_requested: true }) }));
   await page.getByRole('button', { name: 'Cancel' }).click();
   await release.reached;
   await expect(page.getByRole('button', { name: 'Cancelling…' })).toBeDisabled();
+  await expect(polite).toHaveText('Cancelling the render…'); // announced when pressed
   state = 'cancelled'; // the engine stops the render; the watcher sees it and stops polling
   await expect(page.getByRole('button', { name: 'Cancelling…' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
+  await expect(polite).toHaveText('Render cancelled.'); // the watcher's cancelled snapshot
 
   const acked = page.waitForResponse(`**/jobs/${id}/cancel`);
   release(); // the old "running, cancel requested" answer arrives last
@@ -245,6 +248,7 @@ test('a late Cancel acknowledgement never brings back a render that has already 
   await expect(page.getByRole('button', { name: /Render video/ })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Cancelling…' })).toHaveCount(0);
   await expect(page.getByText('Cancelled.').first()).toBeVisible();
+  await expect(polite).toHaveText('Render cancelled.'); // the terminal state is still what's announced
 });
 
 test('a project file never contains a saved job id it shouldn’t follow, or lines removed after a preview', async ({ page }) => {

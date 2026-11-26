@@ -177,17 +177,19 @@
     }
   }
 
-  // The cancel answer is only an acknowledgement: the watcher stays the one source of the job's
-  // state, so a late answer can never put a finished render back to "Cancelling".
+  // The request is announced when Cancel is pressed; the watcher then announces how the render
+  // ended. The engine's answer is only an acknowledgement and announces nothing, so a late answer
+  // can never put a finished render back to "Cancelling" (on screen or for a screen reader).
   async function cancel() {
     const id = job.id;
     cancelPendingFor = id;
+    announce('Cancelling the render…');
     try {
       await api.cancelJob(id);
-      if (attachedId === id) announce('Cancelling the render…');
     } catch (err) {
       if (cancelPendingFor === id) cancelPendingFor = null;
-      announceError(err.message);
+      // Only news while that render is still the one shown and still running.
+      if (attachedId === id && !destroyed && running) announceError(err.message);
     }
   }
 
